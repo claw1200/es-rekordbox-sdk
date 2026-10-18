@@ -1,0 +1,28 @@
+name: SDK validation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check layers and upstream provenance
+        run: |
+          node check-layers.mjs
+          git clone https://github.com/chrisle/rbxport.git --no-checkout upstream
+          git -C upstream checkout 7fb4dad3f88a2cc0cecec0e718b4dde408fd7448
+          node check-upstream.mjs upstream
+      - name: Test SDK workspace
+        run: cargo test --locked --workspace

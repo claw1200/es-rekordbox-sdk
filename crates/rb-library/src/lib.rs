@@ -174,8 +174,8 @@ impl Library {
             if rekordbox_running() {
                 return Err(Error::RekordboxRunning);
             }
-            if std::env::var_os("ES_DB_TEST").is_some() && Some(self.path.clone()) == Self::installed_path() {
-                return Err(Error::Refused("ES_DB_TEST is set; the installed library is never written in tests".into()));
+            if std::env::var_os("RB_LIBRARY_TEST").is_some() && Some(self.path.clone()) == Self::installed_path() {
+                return Err(Error::Refused("RB_LIBRARY_TEST is set; the installed library is never written in tests".into()));
             }
         }
         write::run(&mut self.conn, &self.path.with_file_name("masterPlaylists6.xml"), edit)
