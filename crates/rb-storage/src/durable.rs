@@ -321,6 +321,7 @@ pub fn same_root(left: &Path, right: &Path) -> std::io::Result<bool> {
 /// Best-effort stable fingerprint for binding a reviewed plan to a mounted root.
 /// This detects ordinary unmount/remount replacement; it is not a hardware authenticator.
 pub fn root_fingerprint(root: &Path) -> std::io::Result<String> {
+    #[cfg(not(windows))]
     let metadata = std::fs::metadata(root)?;
     #[cfg(unix)]
     {
@@ -329,8 +330,9 @@ pub fn root_fingerprint(root: &Path) -> std::io::Result<String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        return Ok(format!("windows:{:?}:{:?}", metadata.volume_serial_number(), metadata.file_index()));
+        let handle = winapi_util::Handle::from_path_any(root)?;
+        let info = winapi_util::file::information(&handle)?;
+        return Ok(format!("windows:{:?}:{:?}", Some(info.volume_serial_number()), Some(info.file_index())));
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1076,6 +1078,19 @@ mod tests {
         let right = tempfile::tempdir().unwrap();
         assert_eq!(root_fingerprint(left.path()).unwrap(), root_fingerprint(left.path()).unwrap());
         assert_ne!(root_fingerprint(left.path()).unwrap(), root_fingerprint(right.path()).unwrap());
+    }
+
+    #[test]
+    fn root_fingerprint_tracks_directory_identity_across_rename() {
+        let parent = tempfile::tempdir().unwrap();
+        let original = parent.path().join("original");
+        let renamed = parent.path().join("renamed");
+        std::fs::create_dir(&original).unwrap();
+        let fingerprint = root_fingerprint(&original).unwrap();
+        std::fs::rename(&original, &renamed).unwrap();
+        assert_eq!(fingerprint, root_fingerprint(&renamed).unwrap());
+        std::fs::create_dir(&original).unwrap();
+        assert_ne!(fingerprint, root_fingerprint(&original).unwrap());
     }
 
     #[cfg(unix)]
