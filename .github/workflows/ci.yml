@@ -15,7 +15,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
+      - name: Preserve source bytes for provenance checks
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Check layers and upstream provenance
