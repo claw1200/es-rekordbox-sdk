@@ -34,8 +34,8 @@
     },
     "crates/rbl-core/src/durable.rs": {
       "upstreamSha256": "01af05bf28d61d57558e31de1985571c263c5cd85cc353335a940a35bfebf10b",
-      "localSha256": "c87b4a450f3c25c928a35faeba3af90bd3d6861867c47c365ef7b4493fa6997e",
-      "reason": "Relocated to rb-storage; root_fingerprint was added to bind reviews to a mounted filesystem root."
+      "localSha256": "282865f70bb4b8e7eeda3c61e223588a3b765a915712b8c1845faf0258273d5c",
+      "reason": "Relocated to rb-storage; root_fingerprint binds reviews to a mounted filesystem root using stable Windows handle information, with directory rename and path-reuse regression coverage."
     },
     "crates/rbl-export/Cargo.toml": {
       "upstreamSha256": "b65f4785d806489c0dd4e851a1a8fe777b92b081b83cdd7272a6af34ca0ac69c",
