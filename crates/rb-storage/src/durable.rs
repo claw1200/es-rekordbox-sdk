@@ -1148,7 +1148,7 @@ mod tests {
     fn mark_newer(path: &Path) {
         let times = std::fs::FileTimes::new()
             .set_modified(std::time::SystemTime::now() + Duration::from_secs(10));
-        std::fs::File::open(path).unwrap().set_times(times).unwrap();
+        std::fs::OpenOptions::new().write(true).open(path).unwrap().set_times(times).unwrap();
     }
     #[test]
     fn failed_publication_replays_retained_images_and_deletions() {
@@ -1657,10 +1657,16 @@ mod tests {
     fn filesystems_without_an_operation_are_told_apart_from_failures() {
         // ENOTSUP from renameatx_np(RENAME_EXCL) on a macOS FAT32/exFAT
         // stick, which made exportLibrary.db unwritable (#122).
-        let code = if cfg!(target_vendor = "apple") { 45 } else { 95 };
-        assert!(unsupported(&std::io::Error::from_raw_os_error(code)));
-        assert!(!unsupported(&std::io::Error::from_raw_os_error(2)));
-        assert!(!unsupported(&std::io::Error::from_raw_os_error(13)));
+        #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+        {
+            let code = if cfg!(target_vendor = "apple") { 45 } else { 95 };
+            assert!(unsupported(&std::io::Error::from_raw_os_error(code)));
+        }
+        assert!(unsupported(&std::io::Error::from(std::io::ErrorKind::Unsupported)));
+        assert!(!unsupported(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert!(!unsupported(&std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        #[cfg(windows)]
+        assert!(!unsupported(&std::io::Error::from_raw_os_error(95)));
     }
 
     #[test]
@@ -1681,9 +1687,8 @@ mod tests {
     /// still never over an existing one.
     #[test]
     fn persisting_falls_back_where_the_exclusive_rename_is_unsupported() {
-        let code = if cfg!(target_vendor = "apple") { 45 } else { 95 };
         let unsupported_here = |temp: tempfile::TempPath, _: &Path| {
-            Err(tempfile::PathPersistError { error: std::io::Error::from_raw_os_error(code), path: temp })
+            Err(tempfile::PathPersistError { error: std::io::Error::from(std::io::ErrorKind::Unsupported), path: temp })
         };
         let root = tempfile::tempdir().unwrap();
         let target = root.path().join("exportLibrary.db");
@@ -1703,10 +1708,10 @@ mod tests {
         // Any other failure is reported as it is.
         let temp = tempfile::NamedTempFile::new_in(root.path()).unwrap().into_temp_path();
         let denied = |temp: tempfile::TempPath, _: &Path| {
-            Err(tempfile::PathPersistError { error: std::io::Error::from_raw_os_error(13), path: temp })
+            Err(tempfile::PathPersistError { error: std::io::Error::from(std::io::ErrorKind::PermissionDenied), path: temp })
         };
         let error = persist_new_with(temp, &root.path().join("other.db"), denied).unwrap_err();
-        assert_eq!(error.raw_os_error(), Some(13));
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(!root.path().join("other.db").exists());
     }
 
