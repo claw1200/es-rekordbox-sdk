@@ -37,6 +37,26 @@
       "localSha256": "143fcf43301891929ffe98d00cf3f4c8e7234568d9917b3d86a0219e62cee940",
       "reason": "Relocated to rb-storage; root_fingerprint binds reviews to a mounted filesystem root using stable Windows handle information, with directory rename and path-reuse regression coverage. Tests use writable timestamp handles and portable injected error kinds while retaining platform-specific unsupported-error checks."
     },
+    "crates/rbl-db/src/dropbox.rs": {
+      "upstreamSha256": "71680d0bb29b902c38f1960aac00a0c8494a09a73c2b17f594c12316976a2bfc",
+      "localSha256": "b13e40eca84f7bfc34b5c2836e8fbcb71f93dbe304a0e0a20342f1720e65f193",
+      "reason": "Tests use drive-qualified Dropbox folders on Windows, where a rooted path without a drive is not absolute."
+    },
+    "crates/rbl-db/src/itunes.rs": {
+      "upstreamSha256": "32d794963284cdfed777ba8129337ea327ce7524acce411ada00df75acded709",
+      "localSha256": "73ba0f67100a59ff321890c23452012540de831dddd6e1259ae5028196227247",
+      "reason": "Tests compare candidate library files as paths so Windows separators match."
+    },
+    "crates/rbl-db/src/locate.rs": {
+      "upstreamSha256": "492ca7a4733d820e4fa9bf011d88778e253f7159973d64690a124c1ccdbca289",
+      "localSha256": "a37da9aa4620b585668ab45bac8c5d3aaedf2220c0d30568c418bdace1c54ee0",
+      "reason": "Tests expect masterDbDirectory with forward slashes on Windows, as it is written there, and name the unused library with one separator style."
+    },
+    "crates/rbl-db/src/track_path.rs": {
+      "upstreamSha256": "8ad69b419db0142a3f3157d3d6aaee8e0b61a7e6897e0b344461bf0b60bd991c",
+      "localSha256": "bb5bdf69fd2a55ee32747451393c0dc7eb73dec29af9fd1248a670339f254869",
+      "reason": "Tests compare resolved cloud paths as paths so Windows separators from Path::join match."
+    },
     "crates/rbl-export/Cargo.toml": {
       "upstreamSha256": "b65f4785d806489c0dd4e851a1a8fe777b92b081b83cdd7272a6af34ca0ac69c",
       "localSha256": "79488086be2091393d7716eec999ddac4501467df30c8695179d7574e53d91d9",

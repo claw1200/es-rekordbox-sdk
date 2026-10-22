@@ -128,12 +128,20 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
+    /// `path` as an absolute path on this OS: Windows needs a drive.
+    fn abs(path: &str) -> String {
+        if cfg!(windows) { format!("C:{path}") } else { path.to_owned() }
+    }
+
     #[test]
     fn info_json_gives_absolute_personal_and_business_paths() {
-        let text = r#"{"personal": {"path": "/Users/dj/Library/CloudStorage/Dropbox", "host": 1},
-                       "business": {"path": "relative/Team"}}"#;
-        let parsed = DropboxInfo::parse(text);
-        assert_eq!(parsed.personal.as_deref(), Some("/Users/dj/Library/CloudStorage/Dropbox"));
+        let personal = abs("/Users/dj/Library/CloudStorage/Dropbox");
+        let text = format!(
+            r#"{{"personal": {{"path": "{personal}", "host": 1}},
+                "business": {{"path": "relative/Team"}}}}"#
+        );
+        let parsed = DropboxInfo::parse(&text);
+        assert_eq!(parsed.personal, Some(personal));
         assert_eq!(parsed.business, None, "a relative path is not a folder");
         assert_eq!(DropboxInfo::parse("not json"), DropboxInfo::default());
         assert_eq!(DropboxInfo::parse(r#"{"personal": {}}"#), DropboxInfo::default());
@@ -144,8 +152,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(DropboxInfo::read(home.path()), DropboxInfo::default());
         std::fs::create_dir_all(home.path().join(".dropbox")).unwrap();
-        std::fs::write(info_json(home.path()), r#"{"business": {"path": "/Volumes/Team Dropbox"}}"#).unwrap();
-        assert_eq!(DropboxInfo::read(home.path()).business.as_deref(), Some("/Volumes/Team Dropbox"));
+        let team = abs("/Volumes/Team Dropbox");
+        std::fs::write(info_json(home.path()), format!(r#"{{"business": {{"path": "{team}"}}}}"#)).unwrap();
+        assert_eq!(DropboxInfo::read(home.path()).business, Some(team));
     }
 
     #[test]
@@ -158,14 +167,15 @@ mod tests {
 
     #[test]
     fn an_empty_or_missing_setting_falls_back_to_personal_then_business() {
-        let both = info(Some(Path::new("/p/Dropbox")), Some(Path::new("/b/Dropbox (Team)")));
-        let business_only = info(None, Some(Path::new("/b/Dropbox (Team)")));
+        let (personal, business) = (abs("/p/Dropbox"), abs("/b/Dropbox (Team)"));
+        let both = info(Some(Path::new(&personal)), Some(Path::new(&business)));
+        let business_only = info(None, Some(Path::new(&business)));
         // The reporter's likely case: rekordbox never stored a folder.
-        assert_eq!(check_local_public_path("", &both).as_deref(), Some("/p/Dropbox"));
-        assert_eq!(check_local_public_path("", &business_only).as_deref(), Some("/b/Dropbox (Team)"));
+        assert_eq!(check_local_public_path("", &both), Some(personal.clone()));
+        assert_eq!(check_local_public_path("", &business_only), Some(business));
         // A stale setting is treated like none.
         let gone = "/definitely/not/a/folder/Dropbox";
-        assert_eq!(check_local_public_path(gone, &both).as_deref(), Some("/p/Dropbox"));
+        assert_eq!(check_local_public_path(gone, &both), Some(personal));
         // No setting and no Dropbox app: no folder.
         assert_eq!(check_local_public_path("", &DropboxInfo::default()), None);
         assert_eq!(check_local_public_path(gone, &DropboxInfo::default()), None);

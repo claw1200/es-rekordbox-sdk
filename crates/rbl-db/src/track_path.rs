@@ -347,7 +347,10 @@ mod tests {
     #[test]
     fn another_devices_cloud_track_reads_the_dropbox_copy() {
         let row = shared("/contents_1/a/b.mp3", "/Volumes/Other Mac/b.mp3", SERVICE_DROPBOX, "other-device");
-        assert_eq!(paths(Some("/Users/dj/Dropbox")).resolve(&row), "/Users/dj/Dropbox/rekordbox/contents_1/a/b.mp3");
+        assert_eq!(
+            Path::new(&paths(Some("/Users/dj/Dropbox")).resolve(&row)),
+            Path::new("/Users/dj/Dropbox/rekordbox/contents_1/a/b.mp3")
+        );
     }
 
     #[test]
@@ -367,13 +370,13 @@ mod tests {
         let dropbox = paths(Some("/Users/dj/Dropbox"));
         // OrgFolderPath inside the Dropbox folder.
         let row = shared("/contents_1/a.mp3", "/users/DJ/dropbox/Music/a.mp3", SERVICE_DROPBOX, OWN);
-        assert_eq!(dropbox.resolve(&row), "/Users/dj/Dropbox/rekordbox/contents_1/a.mp3");
+        assert_eq!(Path::new(&dropbox.resolve(&row)), Path::new("/Users/dj/Dropbox/rekordbox/contents_1/a.mp3"));
         // FolderPath not a cloud path at all.
         let row = shared("/Volumes/M/a.mp3", "/Volumes/N/a.mp3", SERVICE_DROPBOX, OWN);
         assert_eq!(dropbox.resolve(&row), "/Volumes/M/a.mp3");
         // OrgFolderPath ending with the cloud path, ignoring case.
         let row = shared("/contents_1/a.mp3", "/Volumes/N/CONTENTS_1/A.MP3", SERVICE_DROPBOX, OWN);
-        assert_eq!(dropbox.resolve(&row), "/Users/dj/Dropbox/rekordbox/contents_1/a.mp3");
+        assert_eq!(Path::new(&dropbox.resolve(&row)), Path::new("/Users/dj/Dropbox/rekordbox/contents_1/a.mp3"));
         // With no Dropbox folder at all (no usable DropboxSharingPath and
         // no Dropbox app record, `crate::dropbox`) rekordbox's share path
         // is empty, which every path starts with. With the setting empty
@@ -392,7 +395,7 @@ mod tests {
         // copy that is opened.
         let other = shared("/contents_1/a.mp3", "/Volumes/X/a.mp3", SERVICE_DROPBOX, "other");
         assert_eq!(resolver.location(&other), "/contents_1/a.mp3");
-        assert_eq!(resolver.resolve(&other), "/D/rekordbox/contents_1/a.mp3");
+        assert_eq!(Path::new(&resolver.resolve(&other)), Path::new("/D/rekordbox/contents_1/a.mp3"));
         let plain = StoredPath { folder_path: "/Volumes/Music/b.mp3".into(), ..StoredPath::default() };
         assert_eq!(resolver.location(&plain), "/Volumes/Music 1/b.mp3");
     }
@@ -406,7 +409,7 @@ mod tests {
     #[test]
     fn an_empty_local_copy_falls_back_to_the_cloud_path() {
         let row = shared("/contents_1/a.mp3", "", SERVICE_DROPBOX, OWN);
-        assert_eq!(paths(Some("/D")).resolve(&row), "/D/rekordbox/contents_1/a.mp3");
+        assert_eq!(Path::new(&paths(Some("/D")).resolve(&row)), Path::new("/D/rekordbox/contents_1/a.mp3"));
     }
 
     #[test]
