@@ -67,6 +67,11 @@
       "localSha256": "2917a16e15357e4e6118c0de19d116a9278de65ce8a104322b91669b64e7a56c",
       "reason": "Compare masterDbDirectory as a path, as it is written with forward slashes on Windows."
     },
+    "crates/rbl-db/tests/writes.rs": {
+      "upstreamSha256": "1f24b35acf9c7ce1c469f8a090e3f4cc689a68ce20022205012a6e89f9045ad0",
+      "localSha256": "1e3048d12066d41af3588bb53d7e7efa79ff6ccba92e09753c4c248b7a867b7d",
+      "reason": "Find imported rows by folder with either separator, as FolderPath keeps Windows backslashes."
+    },
     "crates/rbl-index/tests/cloud_local_copy.rs": {
       "upstreamSha256": "dbc40bd8bf6bb11061e5155ab558c8adede063e1a1557bc9b6963bbf38a58b15",
       "localSha256": "f7a5a62a6420df765dca1083ba4b6aeed5b07bb788571687519911e0c779c9d0",

@@ -32,4 +32,4 @@ jobs:
           git -C upstream checkout 7fb4dad3f88a2cc0cecec0e718b4dde408fd7448
           node check-upstream.mjs upstream
       - name: Test SDK workspace
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --no-fail-fast

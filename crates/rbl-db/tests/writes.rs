@@ -3225,7 +3225,7 @@ fn described(f: &Fixture) -> Vec<Vec<Option<String>>> {
              LEFT JOIN djmdAlbum al ON al.ID = c.AlbumID
              LEFT JOIN djmdGenre g ON g.ID = c.GenreID
              LEFT JOIN djmdKey k ON k.ID = c.KeyID
-             WHERE c.rb_local_deleted = 0 AND c.FolderPath LIKE '%/imports/%'
+             WHERE c.rb_local_deleted = 0 AND REPLACE(c.FolderPath, char(92), '/') LIKE '%/imports/%'
              ORDER BY c.FileNameL",
         )
         .unwrap();
