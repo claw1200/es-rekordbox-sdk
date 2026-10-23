@@ -107,7 +107,7 @@ fn switching_to_a_drive_library_changes_rekordbox_s_setting_and_not_the_library(
     assert_eq!(switched.master_db, drive);
     assert_eq!(switched.share_root, drive_dir.join("share"));
     assert_eq!(std::fs::read(&drive).unwrap(), before, "the library is only read");
-    assert_eq!(master_db_directory(&sources).as_deref(), drive_dir.to_str());
+    assert_eq!(master_db_directory(&sources).as_deref().map(Path::new), Some(drive_dir.as_path()));
     assert!(!sources.agent_options.as_deref().unwrap().exists(), "options.json is rekordbox's to write");
     assert_eq!(found(&sources).master_db, drive, "the next start opens it");
 
@@ -159,7 +159,7 @@ fn a_missing_drive_is_unavailable_until_the_default_is_chosen_and_nothing_is_mad
     assert_eq!(plan_with(&sources).unwrap(), None, "no library is offered on the missing drive");
 
     use_default_with(&sources).unwrap();
-    assert_eq!(master_db_directory(&sources).as_deref(), sources.default_dir.to_str());
+    assert_eq!(master_db_directory(&sources).as_deref().map(Path::new), Some(sources.default_dir.as_path()));
     assert!(!root.path().join("Volumes").exists());
     let plan = plan_with(&sources).unwrap().expect("the default folder is offered once chosen");
     assert_eq!(plan.master_db, sources.default_master_db());

@@ -48,7 +48,11 @@ fn an_own_cloud_track_opens_and_shows_its_local_copy() {
     assert!(db.set_dropbox_folder(Some(dropbox.to_owned())));
     let (index, _) = rbl_index::load(&db).unwrap();
     assert_eq!(path_of(&index, 0), LOCAL);
-    assert_eq!(path_of(&index, 1), format!("{dropbox}/rekordbox{CLOUD}"));
+    // Compared as paths, as `join` uses `\` on Windows.
+    assert_eq!(
+        std::path::PathBuf::from(path_of(&index, 1)),
+        std::path::PathBuf::from(format!("{dropbox}/rekordbox{CLOUD}"))
+    );
     assert_eq!(path_of(&index, 2), LOCAL);
 
     // The Info panel's Location: the local copy for this machine's track,

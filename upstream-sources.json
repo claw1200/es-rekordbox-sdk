@@ -57,6 +57,21 @@
       "localSha256": "bb5bdf69fd2a55ee32747451393c0dc7eb73dec29af9fd1248a670339f254869",
       "reason": "Tests compare resolved cloud paths as paths so Windows separators from Path::join match."
     },
+    "crates/rbl-db/tests/cloud_paths.rs": {
+      "upstreamSha256": "5ddca7672e8a90baef91b1229d7592c81d06c87dd165cdda9072b0f5446ddbed",
+      "localSha256": "ca16a530deed36efb46db066722e321b4dc7029bbecaf22ee7fde2aabcf01251",
+      "reason": "Compare the resolved cloud path as a path so Windows separators from Path::join match."
+    },
+    "crates/rbl-db/tests/new_library.rs": {
+      "upstreamSha256": "931f4136ed4712db38b84529316f620a3d763c6278d5af273b3a516ad0aecb49",
+      "localSha256": "2917a16e15357e4e6118c0de19d116a9278de65ce8a104322b91669b64e7a56c",
+      "reason": "Compare masterDbDirectory as a path, as it is written with forward slashes on Windows."
+    },
+    "crates/rbl-index/tests/cloud_local_copy.rs": {
+      "upstreamSha256": "dbc40bd8bf6bb11061e5155ab558c8adede063e1a1557bc9b6963bbf38a58b15",
+      "localSha256": "f7a5a62a6420df765dca1083ba4b6aeed5b07bb788571687519911e0c779c9d0",
+      "reason": "Compare the resolved Dropbox copy as a path so Windows separators from Path::join match."
+    },
     "crates/rbl-export/Cargo.toml": {
       "upstreamSha256": "b65f4785d806489c0dd4e851a1a8fe777b92b081b83cdd7272a6af34ca0ac69c",
       "localSha256": "79488086be2091393d7716eec999ddac4501467df30c8695179d7574e53d91d9",
