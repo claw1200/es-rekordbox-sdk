@@ -154,6 +154,8 @@ fn a_copied_track_never_lands_on_a_file_the_library_keeps_there() {
     assert!(verify(dest.path()).unwrap().is_ok());
 }
 
+// Windows drops a trailing dot when it makes a folder, so no such path exists there.
+#[cfg(not(windows))]
 #[test]
 fn a_path_a_stick_cannot_name_is_copied_as_rekordbox_does() {
     let dest = common::stick();

@@ -84,8 +84,8 @@
     },
     "crates/rbl-export/src/lib.rs": {
       "upstreamSha256": "a453ec1bd0ef3f4bec23a5ef6fba889ef6583156e41d830001ae2693f905f18f",
-      "localSha256": "b577cc7436451220f26d71c765e9c7bfb82f9d94c8bcd2e575afcf7fba46dc5b",
-      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery."
+      "localSha256": "875dbab65a8b36cff5bb9fae88d5bda5497932dd0ebae75633691c4b91771540",
+      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too."
     },
     "crates/rbl-export/src/manifest.rs": {
       "upstreamSha256": "93061d7f793928f63d1fe3e577724b41277c6992bf18ee23fd9e41a2db2c1e1b",
@@ -131,6 +131,16 @@
       "upstreamSha256": "b0ec7fa5205c59a3c5f23721e67ed290e8cc4a727dd77a80d56515e8c13c9f6c",
       "localSha256": "82a645d84c092f3df8958e5810006d8335226bcfd059b1b9b04591a11887aa99",
       "reason": "Update the helper fixture to the schema-v3 inspect/export protocol."
+    },
+    "crates/rbl-devices/src/lib.rs": {
+      "upstreamSha256": "856ce2e4a25ed72e4473e1ccbf524587b1ee92a068e536ced892382596035410",
+      "localSha256": "3a7c21f17270dcd8b5a100c4c96745fb3803b55200849009fbf6ce57f5e3471c",
+      "reason": "Split the fake volume list as PATH is, so Windows drive letters survive."
+    },
+    "crates/rbl-export/tests/on_stick.rs": {
+      "upstreamSha256": "84081e529c911011031116ed364e8ac25b630fd68a8daedacc42b0ee08fb0ac6",
+      "localSha256": "b66514f05d43701e87d1bf13d4ce135d18889d2c253c5011dae4249a76fa6470",
+      "reason": "Skip the trailing-dot folder case on Windows, which cannot make such a folder."
     }
   },
   "localExtractions": {

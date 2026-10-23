@@ -24,8 +24,9 @@ pub use mounts::MountWatcher;
 
 use std::path::{Path, PathBuf};
 
-/// Set to a `:`-separated list of directories to use those instead of the real
-/// volumes. Tests and `pnpm dev` use it; nothing else should.
+/// Set to a list of directories, separated as `PATH` is (`:`, or `;` on
+/// Windows), to use those instead of the real volumes. Tests and `pnpm dev`
+/// use it; nothing else should.
 pub const FAKE_VOLUMES: &str = "RB_LITE_FAKE_VOLUMES";
 
 /// A volume an export could be written to.
@@ -68,11 +69,9 @@ pub struct DeviceExport {
 #[must_use]
 pub fn list() -> Vec<Device> {
     if let Some(fake) = std::env::var_os(FAKE_VOLUMES) {
-        return fake
-            .to_string_lossy()
-            .split(':')
-            .filter(|path| !path.is_empty())
-            .map(|path| fake_device(Path::new(path)))
+        return std::env::split_paths(&fake)
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| fake_device(&path))
             .collect();
     }
 

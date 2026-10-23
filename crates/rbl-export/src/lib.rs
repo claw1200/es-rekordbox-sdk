@@ -1114,7 +1114,8 @@ fn export_cancellable_inner(
             match prepared {
                 Ok(path) => track.prepared_audio = path,
                 Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
-                Err(ExportError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::NotADirectory) && std::fs::File::open(&track.source_path).is_ok() => {
+                // Windows reports a cache folder under a file as AlreadyExists.
+                Err(ExportError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::NotADirectory | std::io::ErrorKind::AlreadyExists) && std::fs::File::open(&track.source_path).is_ok() => {
                     track.cache_bypass = true;
                 }
                 Err(error) => {
@@ -2611,11 +2612,14 @@ fn context(what: String) -> impl Fn(std::io::Error) -> std::io::Error {
 
 /// Errors that mean the media was unplugged mid-write.
 fn is_device_gone(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        // ENXIO, ENODEV, EIO
-        Some(6 | 19 | 5)
-    )
+    // ENXIO, ENODEV, EIO
+    #[cfg(not(windows))]
+    const GONE: &[i32] = &[6, 19, 5];
+    // ERROR_NOT_READY, ERROR_GEN_FAILURE, ERROR_DEV_NOT_EXIST, ERROR_NO_SUCH_DEVICE,
+    // ERROR_FILE_INVALID, ERROR_DEVICE_NOT_CONNECTED, ERROR_DEVICE_REMOVED
+    #[cfg(windows)]
+    const GONE: &[i32] = &[21, 31, 55, 433, 1006, 1167, 1617];
+    e.raw_os_error().is_some_and(|code| GONE.contains(&code))
 }
 
 /// Re-reads an export with the independent parser and checks it is coherent.
