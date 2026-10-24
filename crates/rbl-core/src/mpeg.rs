@@ -51,6 +51,7 @@ struct Header {
     /// The two layer bits: 1 is Layer III.
     layer: u8,
     sample_rate_index: u8,
+    sample_rate: u32,
     /// 0 stereo, 1 joint stereo, 2 dual channel, 3 mono.
     channel_mode: u8,
     length: usize,
@@ -87,7 +88,7 @@ impl Header {
         let samples = if version == 3 { 1152 } else { 576 };
         let padding = usize::from((c >> 1) & 1);
         let length = usize::try_from(u64::from(samples / 8) * u64::from(bitrate) * 1000 / u64::from(sample_rate)).ok()? + padding;
-        Some(Self { version, layer, sample_rate_index, channel_mode: d >> 6, length, samples })
+        Some(Self { version, layer, sample_rate_index, sample_rate, channel_mode: d >> 6, length, samples })
     }
 
     /// What rekordbox compares between neighbouring frames.
@@ -127,7 +128,8 @@ pub fn rekordbox_lead_frames<R: Read + Seek>(reader: &mut R) -> i64 {
     lead_frames(reader).unwrap_or(0)
 }
 
-fn lead_frames<R: Read + Seek>(reader: &mut R) -> std::io::Result<i64> {
+/// The first bytes of the stream, after any `ID3v2` tags.
+fn mp3_head<R: Read + Seek>(reader: &mut R) -> std::io::Result<Vec<u8>> {
     let mut at = 0u64;
     // ID3v2 tags, one after another, as rekordbox's analyzer skips them.
     loop {
@@ -143,7 +145,73 @@ fn lead_frames<R: Read + Seek>(reader: &mut R) -> std::io::Result<i64> {
     reader.seek(SeekFrom::Start(at))?;
     let mut bytes = Vec::with_capacity(SCAN_BYTES);
     reader.take(SCAN_BYTES as u64).read_to_end(&mut bytes)?;
-    Ok(lead_in(&bytes))
+    Ok(bytes)
+}
+
+fn lead_frames<R: Read + Seek>(reader: &mut R) -> std::io::Result<i64> {
+    Ok(lead_in(&mp3_head(reader)?))
+}
+
+/// What a Layer III decoder adds ahead of the encoder's own delay; rekordbox's `libmpg123` with
+/// gapless on removes exactly this and the tag's delay, 1,105 samples for LAME.
+const DECODER_DELAY: i64 = 529;
+
+/// Samples of encoder and decoder delay the first frame's LAME tag declares, and the sample rate.
+/// `None` without a tag from LAME or ffmpeg that states a delay or padding.
+fn encoder_delay(bytes: &[u8]) -> Option<(i64, u32)> {
+    let frames = first_frames(bytes);
+    let &(at, header) = frames.first()?;
+    let frame = bytes.get(at..at + header.length)?;
+    let crc = if frame.get(1)? & 1 == 0 { 2 } else { 0 };
+    let tag = 4 + crc + header.side_info();
+    if !matches!(frame.get(tag..tag + 4)?, b"Xing" | b"Info") {
+        return None;
+    }
+    let flags = u32::from_be_bytes(frame.get(tag + 4..tag + 8)?.try_into().ok()?);
+    let mut lame = tag + 8;
+    for (bit, size) in [(1, 4), (2, 4), (4, 100), (8, 4)] {
+        if flags & bit != 0 {
+            lame += size;
+        }
+    }
+    if !matches!(frame.get(lame..lame + 4)?, b"LAME" | b"Lavc" | b"Lavf") {
+        return None;
+    }
+    let packed = frame.get(lame + 21..lame + 24)?.iter().fold(0i64, |acc, &b| (acc << 8) | i64::from(b));
+    let (delay, padding) = (packed >> 12, packed & 0xFFF);
+    (delay != 0 || padding != 0).then_some((delay + DECODER_DELAY, header.sample_rate))
+}
+
+/// Containers of integer or lossless audio, which have no encoder delay.
+fn is_delay_free(magic: &[u8]) -> bool {
+    let kind = magic.get(8..12);
+    magic.starts_with(b"fLaC")
+        || (magic.starts_with(b"RIFF") && kind == Some(b"WAVE"))
+        || (magic.starts_with(b"FORM") && matches!(kind, Some(b"AIFF" | b"AIFC")))
+}
+
+/// Seconds from the start of the audio as it was encoded to rekordbox's time 0, read from this file
+/// alone. `None` when the file does not say: an MP3 without a LAME or ffmpeg delay, or a format whose
+/// delay is not known here.
+#[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
+pub fn content_start_seconds<R: Read + Seek>(reader: &mut R) -> Option<f64> {
+    let mut magic = Vec::with_capacity(12);
+    reader.seek(SeekFrom::Start(0)).ok()?;
+    reader.by_ref().take(12).read_to_end(&mut magic).ok()?;
+    if is_delay_free(&magic) {
+        return Some(0.0);
+    }
+    let bytes = mp3_head(reader).ok()?;
+    let (delay, rate) = encoder_delay(&bytes)?;
+    Some((delay + lead_in(&bytes)) as f64 / f64::from(rate))
+}
+
+/// Milliseconds that times on rekordbox's timeline move when `output` replaces `source` as the same
+/// audio. `None` unless both files say what their delay is.
+#[allow(clippy::cast_possible_truncation, reason = "a few seconds at most")]
+pub fn conversion_shift_ms<S: Read + Seek, O: Read + Seek>(source: &mut S, output: &mut O) -> Option<i64> {
+    let shift = content_start_seconds(output)? - content_start_seconds(source)?;
+    Some((shift * 1000.0).round() as i64)
 }
 
 /// [`rekordbox_lead_frames`] over the bytes that follow the ID3 tag.
@@ -263,5 +331,70 @@ mod tests {
         assert_eq!(rekordbox_lead_frames(&mut std::io::Cursor::new(file)), 1152);
         assert_eq!(rekordbox_lead_frames(&mut std::io::Cursor::new(b"RIFF....WAVEfmt ".to_vec())), 0);
         assert_eq!(rekordbox_lead_frames(&mut std::io::Cursor::new(Vec::new())), 0);
+    }
+
+    /// An Info frame with a LAME-style tag that states `delay` and `padding`.
+    fn tagged(mode: u8, encoder: &[u8; 9], delay: u32, padding: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 32];
+        body.extend_from_slice(b"Info\0\0\0\x0f");
+        body.extend_from_slice(&[0; 112]);
+        body.extend_from_slice(encoder);
+        body.extend_from_slice(&[0; 12]);
+        body.extend_from_slice(&((delay << 12) | padding).to_be_bytes()[1..]);
+        frame(mode, &body)
+    }
+
+    fn file(frames: &[Vec<u8>]) -> std::io::Cursor<Vec<u8>> {
+        std::io::Cursor::new(stream(frames))
+    }
+
+    fn lame(delay: u32, padding: u32) -> std::io::Cursor<Vec<u8>> {
+        file(&[tagged(JOINT, b"LAME3.100", delay, padding), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)])
+    }
+
+    fn lavc() -> std::io::Cursor<Vec<u8>> {
+        file(&[tagged(STEREO, b"Lavc61.22", 576, 900), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)])
+    }
+
+    #[test]
+    fn content_starts_after_the_encoder_delay_the_decoder_delay_and_the_lead() {
+        let seconds = content_start_seconds(&mut lame(576, 1000)).unwrap();
+        assert!((seconds - f64::from(576 + 529 + 1152) / 44_100.0).abs() < 1e-12);
+        let seconds = content_start_seconds(&mut lavc()).unwrap();
+        assert!((seconds - 1105.0 / 44_100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_file_that_does_not_state_its_delay_has_no_content_start() {
+        assert_eq!(content_start_seconds(&mut file(&[audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)])), None);
+        assert_eq!(content_start_seconds(&mut file(&[info(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)])), None);
+        assert_eq!(content_start_seconds(&mut lame(0, 0)), None);
+        assert_eq!(content_start_seconds(&mut std::io::Cursor::new(b"OggS\0\x02 and then some".to_vec())), None);
+        assert_eq!(content_start_seconds(&mut std::io::Cursor::new(Vec::new())), None);
+    }
+
+    #[test]
+    fn wav_aiff_and_flac_have_no_delay() {
+        for head in [&b"RIFF\x24\0\0\0WAVEfmt "[..], b"FORM\0\0\0\x26AIFFCOMM", b"fLaC\0\0\0\x22\0\0\0\0"] {
+            assert_eq!(content_start_seconds(&mut std::io::Cursor::new(head.to_vec())), Some(0.0));
+        }
+    }
+
+    #[test]
+    fn converting_between_files_moves_times_by_the_difference_in_content_start() {
+        let wav = || std::io::Cursor::new(b"RIFF\x24\0\0\0WAVEfmt ".to_vec());
+        // The tag's delay and padding are 576 and 1000 samples; the lead adds a frame.
+        assert_eq!(conversion_shift_ms(&mut wav(), &mut lame(576, 1000)), Some(51));
+        assert_eq!(conversion_shift_ms(&mut lame(576, 1000), &mut wav()), Some(-51));
+        // A LAME file's frame of lead is not in an ffmpeg file, though both delays agree.
+        assert_eq!(conversion_shift_ms(&mut lame(576, 1000), &mut lavc()), Some(-26));
+        assert_eq!(conversion_shift_ms(&mut lame(576, 1000), &mut lame(576, 1000)), Some(0));
+    }
+
+    #[test]
+    fn an_unknown_end_gives_no_shift() {
+        let bare = || file(&[audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)]);
+        assert_eq!(conversion_shift_ms(&mut bare(), &mut lame(576, 1000)), None);
+        assert_eq!(conversion_shift_ms(&mut lame(576, 1000), &mut bare()), None);
     }
 }

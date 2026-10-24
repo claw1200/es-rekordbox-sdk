@@ -66,6 +66,7 @@ for (const name of [
   "rb-model",
   "rb-storage",
   "rb-anlz",
+  "rb-audio",
   "rb-library",
   "rb-device",
   "rb-usb",
