@@ -32,6 +32,11 @@
       "localSha256": "20cde72f85552bc9c84f4a222f2041861b840d07c604a1b585fea91e8c4074c4",
       "reason": "Re-export rb-model primitives and rb-storage durability for existing engine/codec callers."
     },
+    "crates/rbl-core/src/mpeg.rs": {
+      "upstreamSha256": "72b46dd1eda9fc4db9e740cc695556331a8967d2330e45cad286276ba1528b9e",
+      "localSha256": "26bfaa7a60cf02d0726184914e7fcff83fdc537ac8e7e94c01b4a5b365b497a9",
+      "reason": "Read an MP3's encoder delay from its LAME or ffmpeg tag and combine it with the frame lead into a content start, for rb-audio."
+    },
     "crates/rbl-core/src/durable.rs": {
       "upstreamSha256": "01af05bf28d61d57558e31de1985571c263c5cd85cc353335a940a35bfebf10b",
       "localSha256": "143fcf43301891929ffe98d00cf3f4c8e7234568d9917b3d86a0219e62cee940",
