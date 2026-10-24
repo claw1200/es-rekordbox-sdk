@@ -1,0 +1,12 @@
+[package]
+name = "rb-audio"
+description = "Where rekordbox's timeline starts in an audio file, read from the file alone."
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rbl-core = { path = "../rbl-core" }
