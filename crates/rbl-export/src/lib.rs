@@ -1921,7 +1921,11 @@ fn export_cancellable_inner(
     before.check_changes_reviewed(previous.as_ref(), &after, &device_additions, &accepted)?;
     progress(&ExportProgress { stage: "verifying", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
     let verified_reused: BTreeSet<String> = trusted.iter().filter(|p| !publication.stage().join(p).is_file()).cloned().collect();
-    let verified = verification::verify_staged_incremental(publication.stage(), destination, &after, &absent_audio, &verified_reused)?;
+    let preserved: BTreeSet<String> = tracks
+        .iter()
+        .filter_map(|track| track.device.as_ref().filter(|device| device.preserve).map(|device| path_key(&device.audio)))
+        .collect();
+    let verified = verification::verify_staged_incremental(publication.stage(), destination, &after, &absent_audio, &verified_reused, &preserved)?;
     if !verified.is_ok() {
         return Err(ExportError::Conflict(format!("The export did not verify, so the USB was left as it was: {}", verification_failure(&verified))));
     }

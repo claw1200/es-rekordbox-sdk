@@ -23,8 +23,16 @@ impl VerifyReport {
 }
 pub fn verify(root: &Path) -> Result<VerifyReport> {
     let snapshot = Snapshot::read(root)?;
-    let mut report = verify_staged(root, root, &snapshot, &BTreeSet::new())?;
-    if let Some(manifest) = crate::Manifest::load(root) {
+    let manifest = crate::Manifest::load(root);
+    let preserved: BTreeSet<String> = manifest
+        .as_ref()
+        .into_iter()
+        .flat_map(|manifest| &manifest.tracks)
+        .filter(|track| track.preserved == Some(true))
+        .map(|track| crate::path_key(&track.audio))
+        .collect();
+    let mut report = verify_staged(root, root, &snapshot, &BTreeSet::new(), &BTreeSet::new(), &preserved)?;
+    if let Some(manifest) = manifest {
         for track in manifest.tracks {
             for extension in track.analysis_extensions {
                 let path = format!("{}/ANLZ0000.{extension}", track.anlz_dir);
@@ -86,8 +94,10 @@ pub(crate) fn verify_staged(
     existing: &Path,
     snapshot: &Snapshot,
     absent: &BTreeSet<String>,
+    trusted: &BTreeSet<String>,
+    preserved: &BTreeSet<String>,
 ) -> Result<VerifyReport> {
-    verify_staged_incremental(root, existing, snapshot, absent, &BTreeSet::new())
+    verify_staged_incremental(root, existing, snapshot, absent, trusted, preserved)
 }
 
 pub(crate) fn verify_staged_incremental(
@@ -96,6 +106,7 @@ pub(crate) fn verify_staged_incremental(
     snapshot: &Snapshot,
     absent: &BTreeSet<String>,
     trusted: &BTreeSet<String>,
+    preserved: &BTreeSet<String>,
 ) -> Result<VerifyReport> {
     let mut report = VerifyReport::default();
     let moves: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> = match std::fs::read(root.join(".moves.json")) {
@@ -131,7 +142,7 @@ pub(crate) fn verify_staged_incremental(
     if ids.len() != legacy.tracks.len() {
         report.errors.push("Duplicate track IDs".into());
     }
-    verify_assets(root, legacy, &resolve, absent, trusted, &mut report)?;
+    verify_assets(root, legacy, &resolve, absent, trusted, preserved, &mut report)?;
     let playlists: BTreeSet<_> = legacy.playlists.iter().map(|p| p.id).collect();
     for p in &legacy.playlists {
         if p.parent != 0
@@ -253,6 +264,7 @@ fn verify_assets(
     resolve: &impl Fn(&str) -> Result<std::path::PathBuf>,
     absent: &BTreeSet<String>,
     trusted: &BTreeSet<String>,
+    preserved: &BTreeSet<String>,
     report: &mut VerifyReport,
 ) -> Result<()> {
     let mut paths = BTreeSet::new();
@@ -269,8 +281,9 @@ fn verify_assets(
             report.missing_audio.push(track.path.clone());
         }
         if !track.analysis.is_empty() {
+            let preserved_track = preserved.contains(&crate::path_key(&track.path));
             let expected = format!("{}/ANLZ0000.DAT", crate::analysis_directory(&track.path, crate::export_root_name(root)?));
-            if track.analysis != expected {
+            if !preserved_track && track.analysis != expected {
                 report.errors.push(format!("Analysis path is not discoverable by the CDJ: {} (expected {expected})", track.analysis));
             }
             let base = Path::new(&track.analysis);
@@ -299,7 +312,7 @@ fn verify_assets(
                     match parsed {
                         Ok(file) => {
                             dat_valid |= extension == "DAT";
-                            if file.path().is_some_and(|p| p != track.path) {
+                            if !preserved_track && file.path().is_some_and(|p| p != track.path) {
                                 report.errors.push(format!("Analysis audio path mismatch: {relative}"));
                             }
                             for section in &file.sections {
@@ -340,7 +353,40 @@ fn verify_assets(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::snapshot::{Playlist, Track};
+    use crate::snapshot::{Library, Playlist, Track};
+
+    #[test]
+    fn preserved_device_analysis_keeps_legacy_paths_but_new_analysis_is_checked() {
+        let root = tempfile::tempdir().unwrap();
+        let library_dir = root.path().join("PIONEER/rekordbox");
+        std::fs::create_dir_all(&library_dir).unwrap();
+        std::fs::write(library_dir.join("exportLibrary.db"), []).unwrap();
+
+        let audio = "/Contents/Artist/Album/Track.mp3";
+        let analysis = "/PIONEER/USBANLZ/P999/DEADBEEF/ANLZ0000.DAT";
+        let audio_file = root.path().join(audio.trim_start_matches('/'));
+        let analysis_file = root.path().join(analysis.trim_start_matches('/'));
+        std::fs::create_dir_all(audio_file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(analysis_file.parent().unwrap()).unwrap();
+        std::fs::write(&audio_file, b"audio").unwrap();
+        std::fs::write(&analysis_file, rbl_anlz::AnlzBuilder::new().path("/stale-audio.mp3").finish()).unwrap();
+
+        let library = Library {
+            tracks: vec![Track { id: 1, title: "Track".into(), path: audio.into(), analysis: analysis.into(), ..Track::default() }],
+            ..Library::default()
+        };
+        let resolve = |path: &str| Ok(root.path().join(path.trim_start_matches('/')));
+        let preserved = [crate::path_key(audio)].into();
+        let mut preserved_report = VerifyReport::default();
+        verify_assets(root.path(), &library, &resolve, &BTreeSet::new(), &BTreeSet::new(), &preserved, &mut preserved_report).unwrap();
+        assert!(preserved_report.errors.is_empty(), "{:?}", preserved_report.errors);
+        assert_eq!(preserved_report.analysis_present, 1);
+
+        let mut generated_report = VerifyReport::default();
+        verify_assets(root.path(), &library, &resolve, &BTreeSet::new(), &BTreeSet::new(), &BTreeSet::new(), &mut generated_report).unwrap();
+        assert!(generated_report.errors.iter().any(|error| error.contains("not discoverable by the CDJ")));
+        assert!(generated_report.errors.iter().any(|error| error.contains("Analysis audio path mismatch")));
+    }
 
     /// A failed sync said only that the two databases disagree
     /// (#161); it has to say where.
