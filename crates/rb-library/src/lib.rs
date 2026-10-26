@@ -221,8 +221,11 @@ fn unlock_with_flags(path: &Path, flags: OpenFlags) -> Result<Connection> {
 pub fn rekordbox_running() -> bool {
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: a GUI parent has no console, so Windows would flash one up per poll.
         Command::new("tasklist")
             .args(["/FI", "IMAGENAME eq rekordbox.exe"])
+            .creation_flags(0x0800_0000)
             .output()
             .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("rekordbox.exe"))
     }
