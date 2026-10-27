@@ -113,6 +113,10 @@ pub struct ManifestTrack {
     pub conversion: String,
     #[serde(default)]
     pub conversion_source_hash: u64,
+    /// What the caller's converter made of the source, for a later sync to reuse the copy. Absent for
+    /// original bytes, the built-in compatibility formats and older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion_info: Option<crate::converter::ConvertedAudio>,
     /// The audio was already on the stick, where the library keeps it, and
     /// the export only pointed the databases at it. It is the library's file,
     /// not a copy of ours, so a later sync never deletes or replaces it.
@@ -258,6 +262,7 @@ mod tests {
                 artwork: String::new(),
                 conversion: String::new(),
                 conversion_source_hash: 0,
+                conversion_info: None,
                 in_place: false,
                 preserved: Some(false),
                 copy_stamp: Some((1234, 1_789_000_000_000_000_000)),

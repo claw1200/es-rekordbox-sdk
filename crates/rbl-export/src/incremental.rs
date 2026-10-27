@@ -135,8 +135,13 @@ pub fn manifest_structure(manifest: &Manifest) -> Result<String> {
 pub fn request(tracks: &[SourceTrack], playlists: &[SourcePlaylist], tags: &[SourceMyTag], options: &ExportOptions<'_>) -> Result<String> {
     // SyncSource and StickSettings have complete, deterministic Debug forms;
     // the transform/schema version controls changes to this representation.
-    digest(&(tracks, playlists, tags, options.compatibility, options.keep_unlisted,
-        format!("{:?}", options.sync), format!("{:?}", options.defaults), TRANSFORM_VERSION))
+    let request = (tracks, playlists, tags, options.compatibility, options.keep_unlisted,
+        format!("{:?}", options.sync), format!("{:?}", options.defaults), TRANSFORM_VERSION);
+    // Without a converter the digest is the one earlier exports recorded.
+    match options.converter {
+        Some(converter) => digest(&(request, converter.profile())),
+        None => digest(&request),
+    }
 }
 
 pub fn inputs(tracks: &[SourceTrack]) -> std::io::Result<BTreeMap<String, Option<FileRevision>>> {
@@ -246,6 +251,14 @@ pub fn trusted_paths(root: &Path, previous: Option<&Manifest>) -> std::io::Resul
 
 pub fn analysis_recipe(track: &SourceTrack, audio: &str) -> Result<String> {
     analysis_recipe_with_revision(track, audio, &revision(&track.source_path)?)
+}
+
+/// `recipe` for analysis a caller's conversion moved, so a different conversion rewrites it.
+pub fn converted_recipe(recipe: String, profile: &str, conversion: Option<crate::ConvertedAudio>) -> Result<String> {
+    match conversion {
+        Some(made) => digest(&(recipe, profile, made.offset_ms)),
+        None => Ok(recipe),
+    }
 }
 
 pub fn analysis_recipe_with_revision(track: &SourceTrack, audio: &str, audio_revision: &Option<FileRevision>) -> Result<String> {

@@ -88,11 +88,12 @@ pub fn inspect_volume(
         )?),
         Err(error) => return Err(error),
     };
+    let up_to_date = crate::plan::up_to_date(&destination, previous.as_ref(), &request, &signatures, tracks, options);
     inspect_state(
         &destination, tracks, playlists, tags, options, &before, previous.as_ref(),
         &signatures, &plan.tracks, &plan.playlists, &rewritten,
         &plan.device_additions,
-        Some(PlanSummary { tracks: plan.tracks.len(), playlists: plan.playlists.len(), estimated_peak_bytes: (!plan.unknown_size).then_some(plan.peak_bytes), approximate: plan.approximate }),
+        Some(plan.summary(up_to_date)),
     )
 }
 

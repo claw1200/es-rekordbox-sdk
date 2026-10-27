@@ -85,6 +85,19 @@ pub struct PlanSummary {
     pub playlists: usize,
     pub estimated_peak_bytes: Option<u64>,
     pub approximate: bool,
+    /// Selected tracks whose audio would be copied as it is, converted, or left as the stick has it.
+    #[serde(default)]
+    pub copy: usize,
+    #[serde(default)]
+    pub convert: usize,
+    #[serde(default)]
+    pub keep: usize,
+    /// Tracks on the stick the sync would take off.
+    #[serde(default)]
+    pub remove: usize,
+    /// The stick already holds exactly what the sync would write.
+    #[serde(default)]
+    pub up_to_date: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -50,7 +50,7 @@ pub fn preview(destination: &Path, tracks: &[SourceTrack], playlists: &[SourcePl
 pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Option<&Manifest>, tracks: &[SourceTrack], playlists: &[SourcePlaylist], options: &ExportOptions<'_>, record: Option<&crate::sync_record::SyncRecord>) -> Result<SyncPlan> {
     let db_id = options.sync.map_or(0, |s| s.db_id);
     let crate::reconcile::Prepared { tracks, playlists, device_additions } = crate::reconcile::prepare(destination, before, previous, tracks, playlists, db_id, options.keep_unlisted, record)?;
-    let estimate = crate::estimate::estimate_inspected(destination, db_id, &tracks, false, options.compatibility, Some(before), options.cache);
+    let estimate = crate::estimate::estimate_inspected(destination, db_id, &tracks, false, options.compatibility, options.converter, Some(before), options.cache);
     let trusted = incremental::trusted_paths(destination, previous)?;
     let recorded: std::collections::HashMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
     let selected: std::collections::HashSet<_> = tracks.iter().map(|t| crate::track_key(t.id, &t.source_path.to_string_lossy())).collect();
@@ -60,7 +60,7 @@ pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Opt
         let key = crate::track_key(track.id, &track.source_path.to_string_lossy());
         let old = recorded.get(&key).copied();
         let unchanged = old.is_some_and(|c| {
-            incremental::analysis_recipe(track, &c.audio).is_ok_and(|r| previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| g.analysis_recipes.get(&key) == Some(&r)))
+            incremental::analysis_recipe(track, &c.audio).and_then(|r| incremental::converted_recipe(r, &c.conversion, c.conversion_info)).is_ok_and(|r| previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| g.analysis_recipes.get(&key) == Some(&r)))
                 && c.analysis_extensions.iter().all(|e| trusted.contains(&format!("{}/ANLZ0000.{e}", c.anlz_dir.trim_start_matches('/'))))
         });
         if !unchanged {
@@ -101,9 +101,38 @@ pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Opt
         recorded.get(&key).is_some_and(|old| estimate.actions.get(&key).is_some_and(|a| matches!(a, crate::estimate::AudioAction::Copy | crate::estimate::AudioAction::Convert))
             && incremental::revision(&t.source_path).is_ok_and(|r| r.is_some_and(|r| r.size == old.size)))
     });
-    let unknown_size = uncertain_revisions || estimate.uncertain_adoption_bytes > 0 || (options.compatibility.is_some() && tracks.iter().any(|t| t.duration_sec == 0 && !t.device.as_ref().is_some_and(|d| d.preserve)));
+    let unknown_size = uncertain_revisions || estimate.uncertain_adoption_bytes > 0 || ((options.compatibility.is_some() || options.converter.is_some()) && tracks.iter().any(|t| t.duration_sec == 0 && !t.device.as_ref().is_some_and(|d| d.preserve)));
     Ok(SyncPlan { tracks, playlists, approximate: true, estimate, database_bytes, asset_bytes, peak_bytes,
         net_additional_bytes: i64::try_from(net).unwrap_or(if net < 0 { i64::MIN } else { i64::MAX }), unknown_size, kept_existing, device_additions })
 }
 
 fn allocation(bytes: u64) -> u64 { bytes.div_ceil(4096).saturating_mul(4096) }
+
+impl SyncPlan {
+    /// The plan as a review shows it. `up_to_date`: see [`up_to_date`].
+    pub(crate) fn summary(&self, up_to_date: bool) -> rb_model::conflict::PlanSummary {
+        use crate::estimate::AudioAction;
+        let count = |wanted: &[AudioAction]| self.estimate.actions.values().filter(|a| wanted.contains(a)).count();
+        rb_model::conflict::PlanSummary {
+            tracks: self.tracks.len(),
+            playlists: self.playlists.len(),
+            estimated_peak_bytes: (!self.unknown_size).then_some(self.peak_bytes),
+            approximate: self.approximate,
+            copy: count(&[AudioAction::Copy]),
+            convert: count(&[AudioAction::Convert]),
+            keep: count(&[AudioAction::Reuse, AudioAction::Adopt, AudioAction::InPlace]),
+            remove: self.estimate.tracks_removed,
+            up_to_date,
+        }
+    }
+}
+
+/// Whether the stick already holds exactly what this export would write: the same request, from sources and
+/// device databases unchanged since, with every output still as it was left.
+pub(crate) fn up_to_date(destination: &Path, previous: Option<&Manifest>, request: &str, signatures: &std::collections::BTreeMap<String, Option<String>>, tracks: &[SourceTrack], options: &ExportOptions<'_>) -> bool {
+    options.settings_files.is_empty() && previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| {
+        g.transform_version == incremental::TRANSFORM_VERSION && g.request == request && g.databases == *signatures
+            && incremental::inputs(tracks).is_ok_and(|inputs| inputs == g.inputs)
+            && incremental::receipts_match(destination, g).unwrap_or(false)
+    })
+}
