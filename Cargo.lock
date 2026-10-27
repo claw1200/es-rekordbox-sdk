@@ -880,6 +880,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rb-audio"
+version = "0.1.0"
+dependencies = [
+ "rbl-core",
+]
+
+[[package]]
 name = "rb-device"
 version = "0.1.0"
 dependencies = [

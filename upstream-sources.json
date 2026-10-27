@@ -32,6 +32,11 @@
       "localSha256": "20cde72f85552bc9c84f4a222f2041861b840d07c604a1b585fea91e8c4074c4",
       "reason": "Re-export rb-model primitives and rb-storage durability for existing engine/codec callers."
     },
+    "crates/rbl-core/src/mpeg.rs": {
+      "upstreamSha256": "72b46dd1eda9fc4db9e740cc695556331a8967d2330e45cad286276ba1528b9e",
+      "localSha256": "f2f75a8910af1d9f40da674d5979088c20d5c6c81c7b961cff34ec0babb862c9",
+      "reason": "Read an MP3's encoder delay from its LAME or ffmpeg tag and combine it with the frame lead into a content start, for rb-audio."
+    },
     "crates/rbl-core/src/durable.rs": {
       "upstreamSha256": "01af05bf28d61d57558e31de1985571c263c5cd85cc353335a940a35bfebf10b",
       "localSha256": "143fcf43301891929ffe98d00cf3f4c8e7234568d9917b3d86a0219e62cee940",
@@ -84,8 +89,13 @@
     },
     "crates/rbl-export/src/lib.rs": {
       "upstreamSha256": "a453ec1bd0ef3f4bec23a5ef6fba889ef6583156e41d830001ae2693f905f18f",
-      "localSha256": "875dbab65a8b36cff5bb9fae88d5bda5497932dd0ebae75633691c4b91771540",
-      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too."
+      "localSha256": "ddaaa2905fda201613f8f6ea0861b4ecc5b66bc6a948e12f3dfad77418ac02e3",
+      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too. Verification includes preserved tracks."
+    },
+    "crates/rbl-export/src/verification.rs": {
+      "upstreamSha256": "1c89b40ee854ff0cfd11d1e5149eaa9bf1fb9504589e891b7859248b81b6a536",
+      "localSha256": "159686ae55d55460c5046cc8036213572ea225b2affb8cd077052f5ce98e4900",
+      "reason": "Export verification includes preserved tracks."
     },
     "crates/rbl-export/src/manifest.rs": {
       "upstreamSha256": "93061d7f793928f63d1fe3e577724b41277c6992bf18ee23fd9e41a2db2c1e1b",

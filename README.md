@@ -14,6 +14,7 @@ application-independent `rb-*` APIs layered over it. It does not contain a CLI.
 - `rb-library`: guarded `master.db` access and transactions.
 - `rb-device`: mounted volume discovery and device-library reads.
 - `rb-anlz`: ANLZ file access and parsing helpers.
+- `rb-audio`: where rekordbox's timeline starts in an audio file, read from the file alone.
 - `rb-usb`: typed inspection, export, and explicit recovery service.
 - `rbl-*`: tested format codecs, database builders/readers, and export engine.
 
