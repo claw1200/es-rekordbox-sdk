@@ -152,6 +152,9 @@ fn lead_frames<R: Read + Seek>(reader: &mut R) -> std::io::Result<i64> {
     Ok(lead_in(&mp3_head(reader)?))
 }
 
+/// How much of a container's start is searched for the chunk that names its codec.
+const HEAD_BYTES: usize = 4096;
+
 /// What a Layer III decoder adds ahead of the encoder's own delay; rekordbox's `libmpg123` with
 /// gapless on removes exactly this and the tag's delay, 1,105 samples for LAME.
 const DECODER_DELAY: i64 = 529;
@@ -162,8 +165,8 @@ fn encoder_delay(bytes: &[u8]) -> Option<(i64, u32)> {
     let frames = first_frames(bytes);
     let &(at, header) = frames.first()?;
     let frame = bytes.get(at..at + header.length)?;
-    let crc = if frame.get(1)? & 1 == 0 { 2 } else { 0 };
-    let tag = 4 + crc + header.side_info();
+    // LAME puts the tag at the same offset whether or not the frame carries a CRC.
+    let tag = 4 + header.side_info();
     if !matches!(frame.get(tag..tag + 4)?, b"Xing" | b"Info") {
         return None;
     }
@@ -182,12 +185,44 @@ fn encoder_delay(bytes: &[u8]) -> Option<(i64, u32)> {
     (delay != 0 || padding != 0).then_some((delay + DECODER_DELAY, header.sample_rate))
 }
 
-/// Containers of integer or lossless audio, which have no encoder delay.
-fn is_delay_free(magic: &[u8]) -> bool {
-    let kind = magic.get(8..12);
-    magic.starts_with(b"fLaC")
-        || (magic.starts_with(b"RIFF") && kind == Some(b"WAVE"))
-        || (magic.starts_with(b"FORM") && matches!(kind, Some(b"AIFF" | b"AIFC")))
+/// The body of the first chunk called `id` among those that follow the 12-byte RIFF or FORM header.
+fn chunk(head: &[u8], id: [u8; 4], big_endian: bool) -> Option<&[u8]> {
+    let mut at = 12;
+    while let Some(header) = head.get(at..at + 8) {
+        let size = <[u8; 4]>::try_from(&header[4..]).ok()?;
+        let size = usize::try_from(if big_endian { u32::from_be_bytes(size) } else { u32::from_le_bytes(size) }).ok()?;
+        let body = at + 8;
+        if header[..4] == id {
+            return head.get(body..(body + size).min(head.len()));
+        }
+        at = body + size + (size & 1);
+    }
+    None
+}
+
+/// Whether the file is lossless or integer or float PCM, which has no encoder delay. The container
+/// alone does not say: WAVE can hold MP3 and AIFC can hold lossy codecs.
+fn is_delay_free(head: &[u8]) -> bool {
+    let kind = head.get(8..12);
+    if head.starts_with(b"fLaC") {
+        return true;
+    }
+    if head.starts_with(b"RIFF") && kind == Some(b"WAVE") {
+        let Some(fmt) = chunk(head, *b"fmt ", false) else { return false };
+        let tag = |at: usize| fmt.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        // 1 is integer PCM and 3 is float; 0xFFFE names its format in the extension.
+        return matches!(tag(0), Some(1 | 3)) || (tag(0) == Some(0xFFFE) && matches!(tag(24), Some(1 | 3)));
+    }
+    if head.starts_with(b"FORM") {
+        return match kind {
+            Some(b"AIFF") => true,
+            Some(b"AIFC") => chunk(head, *b"COMM", true)
+                .and_then(|comm| comm.get(18..22))
+                .is_some_and(|code| matches!(code, b"NONE" | b"sowt" | b"twos" | b"in24" | b"in32" | b"fl32" | b"FL32" | b"fl64" | b"FL64")),
+            _ => false,
+        };
+    }
+    false
 }
 
 /// Seconds from the start of the audio as it was encoded to rekordbox's time 0, read from this file
@@ -195,10 +230,10 @@ fn is_delay_free(magic: &[u8]) -> bool {
 /// delay is not known here.
 #[allow(clippy::cast_precision_loss, reason = "sample counts are far below 2^53")]
 pub fn content_start_seconds<R: Read + Seek>(reader: &mut R) -> Option<f64> {
-    let mut magic = Vec::with_capacity(12);
+    let mut head = Vec::with_capacity(HEAD_BYTES);
     reader.seek(SeekFrom::Start(0)).ok()?;
-    reader.by_ref().take(12).read_to_end(&mut magic).ok()?;
-    if is_delay_free(&magic) {
+    reader.by_ref().take(HEAD_BYTES as u64).read_to_end(&mut head).ok()?;
+    if is_delay_free(&head) {
         return Some(0.0);
     }
     let bytes = mp3_head(reader).ok()?;
@@ -373,16 +408,52 @@ mod tests {
         assert_eq!(content_start_seconds(&mut std::io::Cursor::new(Vec::new())), None);
     }
 
+    fn wav(format: u16) -> Vec<u8> {
+        let mut file = b"RIFF\x24\0\0\0WAVEfmt \x10\0\0\0".to_vec();
+        file.extend(format.to_le_bytes());
+        file.extend([0; 14]);
+        file
+    }
+
+    fn aifc(compression: &[u8; 4]) -> Vec<u8> {
+        let mut file = b"FORM\0\0\0\x30AIFCCOMM\0\0\0\x16".to_vec();
+        file.extend([0; 18]);
+        file.extend(compression);
+        file
+    }
+
     #[test]
-    fn wav_aiff_and_flac_have_no_delay() {
-        for head in [&b"RIFF\x24\0\0\0WAVEfmt "[..], b"FORM\0\0\0\x26AIFFCOMM", b"fLaC\0\0\0\x22\0\0\0\0"] {
-            assert_eq!(content_start_seconds(&mut std::io::Cursor::new(head.to_vec())), Some(0.0));
+    fn pcm_and_flac_have_no_delay() {
+        let float_extensible = {
+            let mut file = b"RIFF\x40\0\0\0WAVEfmt \x28\0\0\0\xFE\xFF".to_vec();
+            file.extend([0; 22]);
+            file.extend(3u16.to_le_bytes());
+            file
+        };
+        for head in [wav(1), wav(3), float_extensible, b"FORM\0\0\0\x26AIFFCOMM".to_vec(), aifc(b"NONE"), aifc(b"sowt"), b"fLaC\0\0\0\x22\0\0\0\0".to_vec()] {
+            assert_eq!(content_start_seconds(&mut std::io::Cursor::new(head)), Some(0.0));
         }
     }
 
     #[test]
+    fn compressed_audio_in_a_pcm_container_has_no_known_delay() {
+        for head in [wav(0x55), wav(2), aifc(b"ima4"), aifc(b"ulaw"), b"RIFF\x24\0\0\0WAVE".to_vec()] {
+            assert_eq!(content_start_seconds(&mut std::io::Cursor::new(head)), None);
+        }
+    }
+
+    #[test]
+    fn a_crc_protected_tag_is_found_at_the_same_offset() {
+        let mut info = tagged(JOINT, b"LAME3.100", 576, 1000);
+        info[1] &= 0xFE;
+        let mut crc_file = file(&[info, audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT), audio(JOINT)]);
+        let seconds = content_start_seconds(&mut crc_file).unwrap();
+        assert!((seconds - f64::from(576 + 529 + 1152) / 44_100.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn converting_between_files_moves_times_by_the_difference_in_content_start() {
-        let wav = || std::io::Cursor::new(b"RIFF\x24\0\0\0WAVEfmt ".to_vec());
+        let wav = || std::io::Cursor::new(wav(1));
         // The tag's delay and padding are 576 and 1000 samples; the lead adds a frame.
         assert_eq!(conversion_shift_ms(&mut wav(), &mut lame(576, 1000)), Some(51));
         assert_eq!(conversion_shift_ms(&mut lame(576, 1000), &mut wav()), Some(-51));
