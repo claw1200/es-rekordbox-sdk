@@ -18,6 +18,7 @@ pub mod ext_pdb;
 pub mod manifest;
 pub mod incremental;
 pub mod cache;
+pub mod converter;
 pub mod plan;
 pub mod sync_record;
 pub mod snapshot;
@@ -29,6 +30,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub use manifest::{track_key, Manifest, ManifestPlaylist, ManifestTrack};
+pub use converter::{AudioConverter, ConvertedAudio};
+use converter::Target;
 pub use sync_record::{SyncNode, SyncRecord, SyncSource};
 
 use rbl_pdb::build::FileBuilder;
@@ -895,6 +898,8 @@ pub struct ExportOptions<'a> {
     pub defaults: Option<&'a rbl_onelibrary::settings::StickSettings>,
     pub sync: Option<&'a SyncSource>,
     pub compatibility: Option<CompatibilityFormat>,
+    /// Convert every track `wants` says needs it with the caller's encoder. Not combined with `compatibility`.
+    pub converter: Option<&'a dyn AudioConverter>,
     pub root: Option<ExportRoot>,
     /// Additional settings images, relative to the export root, staged together.
     pub settings_files: &'a [(String, Vec<u8>)],
@@ -957,7 +962,10 @@ fn export_cancellable_inner(
     let _inspection = incremental::Inspection::new();
     let started = std::time::Instant::now();
     let requested_tracks = tracks;
-    let &ExportOptions { defaults, sync, compatibility, root, keep_unlisted: _, settings_files, cache, expected_volume, verify_all, decisions: _ } = options;
+    let &ExportOptions { defaults, sync, compatibility, converter, root, keep_unlisted: _, settings_files, cache, expected_volume, verify_all, decisions: _ } = options;
+    if compatibility.is_some() && converter.is_some() {
+        return Err(ExportError::Conflict("Choose either compatibility conversion or a converter, not both".into()));
+    }
     if let Some(volume) = expected_volume { volume.check(destination)?; }
     if destination.exists() && !destination.is_dir() {
         return Err(ExportError::NotADirectory(destination.to_owned()));
@@ -1048,12 +1056,7 @@ fn export_cancellable_inner(
         destination, tracks, playlists, my_tags, options, &before, previous.as_ref(),
         &database_signatures, &plan.tracks, &plan.playlists, &rewritten,
         &plan.device_additions,
-        Some(rb_model::conflict::PlanSummary {
-            tracks: plan.tracks.len(),
-            playlists: plan.playlists.len(),
-            estimated_peak_bytes: (!plan.unknown_size).then_some(plan.peak_bytes),
-            approximate: plan.approximate,
-        }),
+        Some(plan.summary(plan::up_to_date(destination, previous.as_ref(), &request, &database_signatures, tracks, options))),
     )?;
     let accepted = review::validate_decisions(&inspection, options.decisions)?;
     review::apply_library_playlist_decisions(
@@ -1093,6 +1096,10 @@ fn export_cancellable_inner(
             let same_source = old.is_some_and(|old| std::fs::metadata(&track.source_path).is_ok_and(|m| source_stamp(&m) == (old.size, old.modified)))
                 && previous.as_ref().and_then(|m| m.generation.as_ref()).is_none_or(|g| g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_none_or(|r| incremental::revision(&track.source_path).is_ok_and(|now| now == *r)));
             let prepared = (|| -> Result<Option<PathBuf>> {
+                // The caller's converter writes straight to the stick; nothing to prepare.
+                if let Some(converter) = converter {
+                    if converter.wants(&track.source_path)? { return Ok(None); }
+                }
                 let conversion = if let Some(target) = compatibility {
                     cache.needs_conversion(&track.source_path)?.then_some(target.audio())
                 } else { None };
@@ -1190,6 +1197,7 @@ fn export_cancellable_inner(
     // never renamed, and nothing else copied over it.
     let kept_paths: Vec<Option<String>> = in_place_paths.iter().zip(&adopted_paths).map(|(a, b)| a.clone().or_else(|| b.clone())).collect();
     let layouts = layouts(tracks, &ids, root_name, previous.as_ref(), &kept_paths, &previous_in_place);
+    let layout_paths: BTreeSet<String> = layouts.iter().map(|place| path_key(&place.audio)).collect();
     // Losing access to a selected source must never delete its good USB copy.
     // A track only carried from the stick has no other source; its missing
     // audio is the stick's own state, kept below as it is.
@@ -1250,12 +1258,16 @@ fn export_cancellable_inner(
         // Reconciliation may carry unrelated device tracks alongside this
         // selection. Their files remain untouched by compatibility conversion.
         let conversion = compatibility.filter(|_| !track.device.as_ref().is_some_and(|d| d.preserve))
-            .map(CompatibilityFormat::audio);
+            .map(|format| Target::Builtin(format.audio()))
+            .or_else(|| converter.filter(|_| !track.device.as_ref().is_some_and(|d| d.preserve)).map(Target::External));
         let conversion = match conversion {
-            Some(target) => match cache.map_or_else(
-                || rbl_audio::compatibility::needs_conversion(&track.source_path).map_err(|e| std::io::Error::other(e.to_string()).into()),
-                |cache| cache.needs_conversion(&track.source_path),
-            ) {
+            Some(target) => match match target {
+                Target::Builtin(_) => cache.map_or_else(
+                    || rbl_audio::compatibility::needs_conversion(&track.source_path).map_err(|e| std::io::Error::other(e.to_string()).into()),
+                    |cache| cache.needs_conversion(&track.source_path),
+                ),
+                Target::External(converter) => converter.wants(&track.source_path).map_err(ExportError::from),
+            } {
                 Ok(true) => Some(target),
                 Ok(false) => None,
                 Err(e) => {
@@ -1267,8 +1279,16 @@ fn export_cancellable_inner(
         };
         if let Some(target) = conversion {
             let stem = Path::new(&place.file_name).file_stem().unwrap_or_default().to_string_lossy();
-            let name = fat_file_name(&format!("{stem}-rbx-cdj-{export_id}.{}", target.extension()));
-            let parent = place.audio.rsplit_once('/').map_or("/Contents", |(parent, _)| parent);
+            let parent = place.audio.rsplit_once('/').map_or("/Contents", |(parent, _)| parent).to_owned();
+            let name = match target {
+                Target::Builtin(_) => fat_file_name(&format!("{stem}-rbx-cdj-{export_id}.{}", target.extension())),
+                // The library's own name with the new extension, unless another file would have it.
+                Target::External(_) => {
+                    let renamed = fat_file_name(&format!("{stem}.{}", target.extension()));
+                    let taken = |name: &str| { let key = path_key(&format!("{parent}/{name}")); layout_paths.contains(&key) || written_audio_paths.contains(&key) };
+                    if taken(&renamed) { fat_file_name(&format!("{stem}-{export_id}.{}", target.extension())) } else { renamed }
+                }
+            };
             place.audio = format!("{parent}/{name}");
             place.file_name = name;
         }
@@ -1301,7 +1321,9 @@ fn export_cancellable_inner(
         // The stick's own copy, still where its row says and not renamed for
         // a conversion or an analysis collision: kept, nothing copied.
         let adopted = !in_place && adopted_paths.get(index).and_then(Option::as_deref) == Some(place.audio.as_str());
-        let profile = conversion.map_or("", rbl_audio::compatibility::Format::profile);
+        let profile = conversion.as_ref().map_or("", Target::profile);
+        // A copy the caller converted is reused only with the record of what its conversion made.
+        let external = matches!(conversion, Some(Target::External(_)));
         let audio_dest = under(destination, &place.audio);
         let retained_audio = preserved && same_file(&track.source_path, &audio_dest);
         // Looked at, not yet claimed: a track that fails below must leave
@@ -1311,6 +1333,7 @@ fn export_cancellable_inner(
             g.inputs.get(&source).is_none_or(|old| incremental::revision(&track.source_path).is_ok_and(|now| now == *old))
         });
         let moved = previous_entry.filter(|c| c.audio != place.audio && c.size == size && c.conversion == profile
+            && (!external || c.conversion_info.is_some())
             && ((c.modified == modified && source_receipt_matches) || source_contents_unchanged.contains(&key))
             && !owns_library_file(destination, c) && !audio_dest.exists()
             && copy_stamp(&under(destination, &c.audio)).is_ok_and(|now| same_copy(c.copy_stamp, now)));
@@ -1325,6 +1348,7 @@ fn export_cancellable_inner(
         // the stick, and still actually there.
         let unchanged_metadata = !in_place && previous_entry.is_some_and(|c| {
             c.audio == place.audio && c.size == size && c.conversion == profile
+                && (!external || c.conversion_info.is_some())
                 && ((c.modified == modified && source_receipt_matches) || source_contents_unchanged.contains(&key))
         });
         // The stick's copy as it is now, by size and time only.
@@ -1383,10 +1407,12 @@ fn export_cancellable_inner(
 
         let output_size;
         let copied_hash = std::cell::Cell::new(None);
+        let mut conversion_info: Option<ConvertedAudio> = None;
         if absent {
             output_size = size;
         } else if retained_audio || moved.is_some() {
             output_size = size;
+            conversion_info = moved.and_then(|c| c.conversion_info);
             report.reused += 1;
             report.bytes_reused += size;
         } else if in_place {
@@ -1400,6 +1426,7 @@ fn export_cancellable_inner(
             report.bytes_reused += size;
         } else if unchanged {
             output_size = std::fs::metadata(&audio_dest)?.len();
+            conversion_info = carried.and_then(|c| c.conversion_info);
             report.reused += 1;
             report.bytes_reused += output_size;
         } else {
@@ -1410,7 +1437,14 @@ fn export_cancellable_inner(
                 std::fs::create_dir_all(parent).map_err(context(format!("Could not create the folder for '{}'", track.title)))?;
             }
             let written = match conversion {
-                Some(target) => {
+                Some(Target::External(converter)) => {
+                    report.converted += 1;
+                    progress(&ExportProgress { stage: "converting", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: tracks.len(), ..Default::default() });
+                    converter.convert(&track.source_path, &audio_dest)
+                        .and_then(|made| { conversion_info = Some(made); std::fs::metadata(&audio_dest).map(|m| m.len()) })
+                        .map_err(|e| std::io::Error::other(format!("{}: {e}", track.title)))
+                }
+                Some(Target::Builtin(target)) => {
                     report.converted += 1;
                     if let Some(cache) = cache.filter(|_| !track.cache_bypass) {
                         match cache.converted(&track.source_path, target, &mut |done, total| {
@@ -1468,11 +1502,17 @@ fn export_cancellable_inner(
             }
         }
 
-        let recipe = incremental::analysis_recipe(track, &place.audio)?;
+        let conversion_info = conversion_info.filter(|_| external);
+        // The stick's analysis is moved by the conversion, so a different one rewrites it.
+        let converted_recipe = |recipe: String| match conversion_info {
+            Some(made) => incremental::digest(&(recipe, profile, made.offset_ms)),
+            None => Ok(recipe),
+        };
+        let recipe = converted_recipe(incremental::analysis_recipe(track, &place.audio)?)?;
         analysis_recipes.insert(key.clone(), recipe.clone());
         let comparison_recipe = if source_contents_unchanged.contains(&key) {
             previous.as_ref().and_then(|m| m.generation.as_ref()).and_then(|g| g.inputs.get(&source))
-                .map_or_else(|| Ok(recipe.clone()), |revision| incremental::analysis_recipe_with_revision(track, &place.audio, revision))?
+                .map_or_else(|| Ok(recipe.clone()), |revision| incremental::analysis_recipe_with_revision(track, &place.audio, revision).and_then(converted_recipe))?
         } else { recipe.clone() };
         let mut analysis_reused = carried.filter(|c| c.anlz_dir == place.anlz_dir)
             .filter(|c| previous.as_ref().and_then(|m| m.generation.as_ref())
@@ -1503,6 +1543,7 @@ fn export_cancellable_inner(
             })
         }));
         if content_changed && analysis_not_updated { analysis_reused = None; }
+        let mut analysis_from_stick = false;
         hydrated.analysis = if content_changed && analysis_not_updated {
             report.warnings.push(ExportWarning { track_id: track.id, title: track.title.clone(), reason: "analysis-stale".into(), detail: None });
             hydrated.cues = Some(Vec::new());
@@ -1537,14 +1578,23 @@ fn export_cancellable_inner(
                     None => (Vec::new(), false),
                 };
                 let detail = loaded.as_ref().err().map(ToString::to_string);
+                analysis_from_stick = is_kept;
                 report.warnings.push(ExportWarning { track_id: track.id, title: track.title.clone(),
                     reason: if is_kept { "analysis-kept" } else { "analysis-unavailable" }.into(), detail });
                 kept
             } else { loaded? }
         };
+        if let (Some(made), Some(cues)) = (conversion_info, hydrated.cues.as_mut()) {
+            converter::shift_cues(cues, made.offset_ms, u64::from(hydrated.duration_sec) * 1000);
+        }
         let track = &hydrated;
         let exported_analysis = if analysis_reused.is_some() || track.device.as_ref().is_some_and(|d| d.preserve) { None } else {
             Some(track.analysis.iter().map(|(extension, bytes)| {
+                let shifted;
+                let bytes = match conversion_info.filter(|made| made.offset_ms != 0 && !analysis_from_stick).zip(converter) {
+                    Some((made, converter)) => { shifted = converter.shift_analysis(extension, bytes, made.offset_ms)?; &shifted }
+                    None => bytes,
+                };
                 let mut parsed = rbl_anlz::parse(bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
                 let path_bytes = rbl_anlz::AnlzBuilder::new().path(&place.audio).finish();
                 let path = rbl_anlz::parse(&path_bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -1689,6 +1739,7 @@ fn export_cancellable_inner(
             },
             conversion: if track.source_unavailable { carried.map_or_else(|| profile.to_owned(), |old| old.conversion.clone()) } else { profile.to_owned() },
             conversion_source_hash: if track.source_unavailable { carried.map_or(source_hash, |old| old.conversion_source_hash) } else { source_hash },
+            conversion_info: if track.source_unavailable { carried.and_then(|old| old.conversion_info) } else { conversion_info },
             audio_hash,
             in_place: in_place && !absent,
             preserved: Some(preserved && !track.device.as_ref().is_some_and(|d| d.exported)),
@@ -1699,15 +1750,15 @@ fn export_cancellable_inner(
         // Gathered here rather than re-derived later, so the two databases
         // cannot disagree about a path or a size.
         let mut metadata = track.metadata.clone();
-        if conversion.is_some() { metadata.bit_depth = 16; }
+        if conversion.is_some() { metadata.bit_depth = conversion_info.map_or(16, |made| made.bit_depth); }
         let library_id = track.device.as_ref().map_or(track.id, |d| d.master_content_id);
         let master_db_id = track.device.as_ref().map_or(db_id, |d| d.master_db_id);
         one_library_tracks.push(OneLibraryTrack {
             metadata,
             cues: track.cues.clone(),
             year: track.year, release_date: track.release_date.clone(),
-            bitrate: if conversion.is_some() { 0 } else { track.bitrate },
-            sample_rate: if conversion.is_some() { 44_100 } else { track.sample_rate },
+            bitrate: conversion_info.map_or(if conversion.is_some() { 0 } else { track.bitrate }, |made| made.bitrate),
+            sample_rate: conversion_info.map_or(if conversion.is_some() { 44_100 } else { track.sample_rate }, |made| made.sample_rate),
             export_id,
             library_id,
             master_db_id,
@@ -1745,8 +1796,8 @@ fn export_cancellable_inner(
             tempo_x100: track.bpm_x100,
             duration_sec: track.duration_sec,
             year: track.year,
-            bitrate: conversion.map_or(track.bitrate, rbl_audio::compatibility::Format::bitrate),
-            sample_rate: if conversion.is_some() { rbl_audio::compatibility::RATE } else { track.sample_rate },
+            bitrate: conversion_info.map_or_else(|| conversion.and_then(Target::builtin).map_or(track.bitrate, rbl_audio::compatibility::Format::bitrate), |made| made.bitrate),
+            sample_rate: conversion_info.map_or(if conversion.is_some() { rbl_audio::compatibility::RATE } else { track.sample_rate }, |made| made.sample_rate),
             // The library's figure when it has one, as rekordbox writes it,
             // even where the file has since changed by a few bytes of tags.
             file_size: u32::try_from(
@@ -1755,7 +1806,7 @@ fn export_cancellable_inner(
             .unwrap_or(0),
             track_number: track.metadata.track_number,
             disc_number: track.metadata.disc_number,
-            sample_depth: conversion.map_or(track.metadata.bit_depth, |_| 16),
+            sample_depth: conversion_info.map_or(conversion.map_or(track.metadata.bit_depth, |_| 16), |made| made.bit_depth),
             // The same pair exportLibrary.db gets, as rekordbox writes both.
             master_db_id: u32::try_from(master_db_id).unwrap_or(0),
             master_content_id: u32::try_from(library_id).unwrap_or(0),

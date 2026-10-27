@@ -9,11 +9,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use crate::converter::Target;
 use crate::manifest::{track_key, Manifest};
 use crate::snapshot::Snapshot;
 use crate::{
     in_place_paths, owns_library_file, path_key, previous_in_place, source_stamp, under,
-    CompatibilityFormat, SourceTrack,
+    AudioConverter, CompatibilityFormat, SourceTrack,
 };
 
 /// The space a sync would use and give back on one stick.
@@ -74,12 +75,13 @@ pub fn estimate(
     delete_unlisted_music: bool,
     compatibility: Option<CompatibilityFormat>,
 ) -> Estimate {
-    estimate_inspected(destination, db_id, tracks, delete_unlisted_music, compatibility, None, None)
+    estimate_inspected(destination, db_id, tracks, delete_unlisted_music, compatibility, None, None, None)
 }
 
+#[allow(clippy::too_many_arguments, reason = "the export's own options, passed apart so `estimate` needs none")]
 pub(crate) fn estimate_inspected(
     destination: &Path, db_id: u64, tracks: &[SourceTrack], delete_unlisted_music: bool,
-    compatibility: Option<CompatibilityFormat>, snapshot: Option<&Snapshot>, cache: Option<&crate::cache::PreparationCache>,
+    compatibility: Option<CompatibilityFormat>, converter: Option<&dyn AudioConverter>, snapshot: Option<&Snapshot>, cache: Option<&crate::cache::PreparationCache>,
 ) -> Estimate {
     let previous = Manifest::load(destination).filter(|m| m.db_id == db_id);
     let previous_place = previous_in_place(destination, previous.as_ref());
@@ -110,11 +112,13 @@ pub(crate) fn estimate_inspected(
             result.actions.insert(key, AudioAction::InPlace);
             continue;
         }
+        let preserved = track.device.as_ref().is_some_and(|d| d.preserve);
         let conversion = compatibility
-            .filter(|_| !track.device.as_ref().is_some_and(|d| d.preserve))
-            .map(CompatibilityFormat::audio)
-            .filter(|_| cache.map_or_else(|| rbl_audio::compatibility::needs_conversion(&track.source_path).unwrap_or(false), |cache| cache.needs_conversion(&track.source_path).unwrap_or(false)));
-        let profile = conversion.map_or("", rbl_audio::compatibility::Format::profile);
+            .filter(|_| !preserved)
+            .map(|format| Target::Builtin(format.audio()))
+            .filter(|_| cache.map_or_else(|| rbl_audio::compatibility::needs_conversion(&track.source_path).unwrap_or(false), |cache| cache.needs_conversion(&track.source_path).unwrap_or(false)))
+            .or_else(|| converter.filter(|c| !preserved && c.wants(&track.source_path).unwrap_or(false)).map(Target::External));
+        let profile = conversion.as_ref().map_or("", Target::profile);
         let carried = recorded.get(&key).copied();
         // The stick's own copy of a track another writer exported from this
         // library, which the sync keeps as it is (`adopted_paths`).
@@ -132,6 +136,7 @@ pub(crate) fn estimate_inspected(
         }
         let unchanged = carried.is_some_and(|c| {
             !c.in_place && c.size == size && c.modified == modified && c.conversion == profile
+                && (!matches!(conversion, Some(Target::External(_))) || c.conversion_info.is_some())
                 && crate::copy_stamp(&under(destination, &c.audio)).is_ok_and(|now| crate::same_copy(c.copy_stamp, now))
                 && previous.as_ref().and_then(|m| m.generation.as_ref()).is_none_or(|g| {
                     g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_none_or(|old| crate::incremental::revision(&track.source_path).is_ok_and(|now| now == *old))
@@ -149,6 +154,10 @@ pub(crate) fn estimate_inspected(
             result.tracks_new += 1;
         }
         result.copy_bytes += conversion.map_or(size, |target| {
+            let target = match target {
+                Target::Builtin(format) => format,
+                Target::External(converter) => return converter.estimate_bytes(u64::from(track.duration_sec)),
+            };
             if let Some(size) = cache.and_then(|cache| cache.converted_size(&track.source_path, target)) { return size; }
             let duration = cache.and_then(|cache| cache.properties(&track.source_path).ok())
                 .and_then(|p| p.frames.zip(p.sample_rate.filter(|rate| *rate > 0)))

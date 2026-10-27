@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use rb_model::source::Source;
 
+pub use rbl_export::{AudioConverter, ConvertedAudio};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
@@ -46,10 +48,28 @@ impl From<rbl_export::ExportError> for Error {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Options {
     pub settings_dir: Option<PathBuf>,
     pub decisions: Option<rb_model::conflict::Decisions>,
+    /// Converts each track it wants on the way to the stick; the review and the export must be given the same.
+    pub converter: Option<std::sync::Arc<dyn rbl_export::AudioConverter + Send>>,
+}
+
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("settings_dir", &self.settings_dir)
+            .field("decisions", &self.decisions)
+            .field("converter", &self.converter.as_ref().map(|c| c.profile().to_owned()))
+            .finish()
+    }
+}
+
+impl Options {
+    fn converter(&self) -> Option<&dyn rbl_export::AudioConverter> {
+        self.converter.as_deref().map(|c| c as &dyn rbl_export::AudioConverter)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +114,7 @@ pub fn inspect(destination: &Path, source: &Source, options: &Options) -> Result
         &tracks,
         &playlists,
         &tags,
-        &rbl_export::ExportOptions { sync: Some(&sync), settings_files: &settings, ..Default::default() },
+        &rbl_export::ExportOptions { sync: Some(&sync), settings_files: &settings, converter: options.converter(), ..Default::default() },
     )?)
 }
 
@@ -131,6 +151,7 @@ pub fn export(
         &rbl_export::ExportOptions {
             sync: Some(&sync),
             settings_files: &settings,
+            converter: options.converter(),
             ..Default::default()
         },
     )?;
@@ -144,6 +165,7 @@ pub fn export(
             sync: Some(&sync),
             settings_files: &settings,
             decisions: options.decisions.as_ref(),
+            converter: options.converter(),
             ..Default::default()
         },
         &mut |event| {
@@ -293,7 +315,7 @@ mod tests {
             &source,
             &Options {
                 settings_dir: Some(settings.clone()),
-                decisions: None,
+                ..Options::default()
             },
             &mut |_| {},
             &|| false,
@@ -309,7 +331,7 @@ mod tests {
             &source,
             &Options {
                 settings_dir: Some(settings),
-                decisions: None,
+                ..Options::default()
             },
             &mut |_| {},
             &|| false,
