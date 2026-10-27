@@ -14,7 +14,7 @@ const PREVIEW: usize = 400;
 const TINY_PREVIEW: usize = 100;
 const COLOR_PREVIEW: usize = 1200;
 const VBR_ENTRIES: usize = 400;
-const DETAIL_RATE: u32 = 150;
+pub(crate) const DETAIL_RATE: u32 = 150;
 const SILENCE: f64 = 1.0 / 255.0;
 const DB_FLOOR: f64 = -60.0;
 
@@ -118,6 +118,12 @@ fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_be_bytes()).collect()
 }
 
+/// A `PVBR` with no seek table, as rekordbox writes for every file that isn't a VBR MP3.
+#[must_use]
+pub fn empty_vbr_tag() -> Vec<u8> {
+    tag("PVBR", &[0; 4], &vec![0; 4 * (VBR_ENTRIES + 1)])
+}
+
 /// One beat: its number in the bar, the tempo times 100 and its time in milliseconds.
 pub type Beat = (u16, u16, u32);
 
@@ -193,8 +199,7 @@ pub fn new_files(audio_name: &str, beats: &[Beat], features: &[Row]) -> [(&'stat
     let path = crate::write::path_tag(&format!("?/{audio_name}"));
     let waves = wave_tags(features);
     let wave = |kind: &str| waves.iter().find(|(k, _)| *k == kind).map(|(_, t)| t.clone()).unwrap_or_default();
-    let vbr = tag("PVBR", &[0; 4], &vec![0; 4 * (VBR_ENTRIES + 1)]);
-    let dat: Vec<Vec<u8>> = [vec![path.clone(), vbr, beatgrid_tag(beats), wave("PWAV"), wave("PWV2")], cue_tags()].concat();
+    let dat: Vec<Vec<u8>> = [vec![path.clone(), empty_vbr_tag(), beatgrid_tag(beats), wave("PWAV"), wave("PWV2")], cue_tags()].concat();
     let ext: Vec<Vec<u8>> = [vec![path.clone(), wave("PWV3")], cue_tags(), extended_cue_tags(), vec![wave("PWV5"), wave("PWV4")]].concat();
     let ex2 = vec![path, wave("PWV7"), wave("PWV6")];
     [("DAT", file(&dat)), ("EXT", file(&ext)), ("2EX", file(&ex2))]
