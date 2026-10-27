@@ -106,18 +106,18 @@ pub(crate) fn estimate_inspected(
             continue;
         };
         let (size, modified) = source_stamp(&meta);
-        // The library's own file, already where the stick needs it.
-        if on_stick.get(index).is_some_and(Option::is_some) {
-            result.tracks_kept += 1;
-            result.actions.insert(key, AudioAction::InPlace);
-            continue;
-        }
         let preserved = track.device.as_ref().is_some_and(|d| d.preserve);
         let conversion = compatibility
             .filter(|_| !preserved)
             .map(|format| Target::Builtin(format.audio()))
             .filter(|_| cache.map_or_else(|| rbl_audio::compatibility::needs_conversion(&track.source_path).unwrap_or(false), |cache| cache.needs_conversion(&track.source_path).unwrap_or(false)))
             .or_else(|| converter.filter(|c| !preserved && c.wants(&track.source_path).unwrap_or(false)).map(Target::External));
+        // The library's own file, already where the stick needs it; a converted copy goes beside it.
+        if conversion.is_none() && on_stick.get(index).is_some_and(Option::is_some) {
+            result.tracks_kept += 1;
+            result.actions.insert(key, AudioAction::InPlace);
+            continue;
+        }
         let profile = conversion.as_ref().map_or("", Target::profile);
         let carried = recorded.get(&key).copied();
         // The stick's own copy of a track another writer exported from this

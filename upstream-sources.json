@@ -19,7 +19,7 @@
     "rbl-export": [
       { "path": "src/review.rs", "sha256": "cee6d7850b9265820a2987a67ad969d8812c859b4833af9dc1e0fd31bf651594", "reason": "Read-only typed inspection, stale-plan validation and conflict evidence." },
       { "path": "src/converter.rs", "sha256": "13e0ee4daf169b3749e4e5bea9f0a00a936d03aa6a632b2f9bffc4de69285687", "reason": "The AudioConverter a caller converts tracks with on the way to the stick." },
-      { "path": "tests/converter.rs", "sha256": "e3ce0ab553e68c87ebac07b71c528398ac1e8b1b348bfd1dc2c8f6ade95b51e5", "reason": "Converter selection, recorded conversions, reuse on a second sync, and turning conversion off." },
+      { "path": "tests/converter.rs", "sha256": "e7002435aba7e25bca2a20f67bcb20bba36f1d46e45a6ce8d6d870b88f9bcf40", "reason": "Converter selection, recorded conversions, reuse on a second sync, and turning conversion off." },
       { "path": "tests/review.rs", "sha256": "6d388c1e0df59a16697a57eccde350e6ebc347c6f44046fa03ce92fcb78958d8", "reason": "Decision, recovery, schema, integrity and stale-token regression coverage." }
     ]
   },
@@ -91,7 +91,7 @@
     },
     "crates/rbl-export/src/lib.rs": {
       "upstreamSha256": "a453ec1bd0ef3f4bec23a5ef6fba889ef6583156e41d830001ae2693f905f18f",
-      "localSha256": "52eca13638318b3dec484647cbedc5d91eaa74c1406ecd73cc792f5173a7a6ff",
+      "localSha256": "5a8ab5bdf10fe2655b319de7de8cb0d01fc409fa246f84a44576178e3640fcde",
       "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too. Verification includes preserved tracks. A caller's AudioConverter converts tracks it wants, moves their cues and analysis by its offset, describes its output in both databases and is reused from the manifest; plan summaries count copies, conversions and removals."
     },
     "crates/rbl-export/src/verification.rs": {
@@ -106,17 +106,17 @@
     },
     "crates/rbl-export/src/plan.rs": {
       "upstreamSha256": "9465a01495382345f64dfeff6afc8a9cb183cdb3e1a5bb79b2d2c0d4f3e8c1ff",
-      "localSha256": "408b11d23792573f4a553e9da642be8aa7d2f7fadffde639ebec40253f2ed9ca",
+      "localSha256": "b3c78fc41907ef9a9ff1d6a682166498952e9461bccada858a688e2ebba00d1d",
       "reason": "Estimates include a caller's converter; plan summaries count copies, conversions, kept tracks and removals, and say when the stick is up to date."
     },
     "crates/rbl-export/src/estimate.rs": {
       "upstreamSha256": "f491cbd24b74c3437ce1963cf209d69ded0b30a43346c6af672485e96096facc",
-      "localSha256": "49a124b5f926915937745fecc5a47fc353cf31a8adf6ae2b9bfc5a21ea2b8379",
+      "localSha256": "84631df4a61b1e07bde693247f4e3b02beb945c50c21cd1cd31a97cecac01316",
       "reason": "Tracks a caller's converter wants count as conversions, sized by its estimate, and are reused only with a recorded conversion."
     },
     "crates/rbl-export/src/incremental.rs": {
       "upstreamSha256": "1c80e394e7bd2a5d1398faac7165de1cc66d989e893ffca25376122e5b6eeafc",
-      "localSha256": "db7dbdcf7c7be5965cb82e154dd00d881ae033e779eb93bf0bb2c509a7d8401f",
+      "localSha256": "cb1a8cb5fcec84aa0b4c5a81a3cbfa6953f61cb685a34f13a7f141ed164afc84",
       "reason": "The request digest includes a caller's converter profile, and is unchanged without one."
     },
     "crates/rbl-export/src/snapshot.rs": {

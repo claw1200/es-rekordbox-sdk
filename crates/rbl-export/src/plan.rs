@@ -60,7 +60,7 @@ pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Opt
         let key = crate::track_key(track.id, &track.source_path.to_string_lossy());
         let old = recorded.get(&key).copied();
         let unchanged = old.is_some_and(|c| {
-            incremental::analysis_recipe(track, &c.audio).is_ok_and(|r| previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| g.analysis_recipes.get(&key) == Some(&r)))
+            incremental::analysis_recipe(track, &c.audio).and_then(|r| incremental::converted_recipe(r, &c.conversion, c.conversion_info)).is_ok_and(|r| previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| g.analysis_recipes.get(&key) == Some(&r)))
                 && c.analysis_extensions.iter().all(|e| trusted.contains(&format!("{}/ANLZ0000.{e}", c.anlz_dir.trim_start_matches('/'))))
         });
         if !unchanged {

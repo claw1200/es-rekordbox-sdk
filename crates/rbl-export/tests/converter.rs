@@ -12,11 +12,12 @@ use rbl_export::{export_with_options, AudioConverter, ConvertedAudio, ExportOpti
 
 const OFFSET_MS: i64 = 23;
 
-/// "Converts" anything that isn't an MP3 by copying it, and moves the beat grid by [`OFFSET_MS`].
+/// "Converts" anything that isn't an MP3 by copying it with a suffix, and moves the beat grid by [`OFFSET_MS`].
 #[derive(Default)]
 struct Fake {
     conversions: AtomicUsize,
     shifted: Mutex<Vec<(String, i64)>>,
+    fail: Option<std::io::ErrorKind>,
 }
 
 impl AudioConverter for Fake {
@@ -24,8 +25,9 @@ impl AudioConverter for Fake {
     fn extension(&self) -> &str { "mp3" }
     fn wants(&self, source: &Path) -> std::io::Result<bool> { Ok(source.extension().is_none_or(|e| e != "mp3")) }
     fn convert(&self, source: &Path, destination: &Path) -> std::io::Result<ConvertedAudio> {
+        if let Some(kind) = self.fail { return Err(kind.into()) }
         self.conversions.fetch_add(1, Ordering::SeqCst);
-        std::fs::copy(source, destination)?;
+        std::fs::write(destination, [std::fs::read(source)?, b"-converted".to_vec()].concat())?;
         Ok(ConvertedAudio { offset_ms: OFFSET_MS, bitrate: 320, sample_rate: 44_100, bit_depth: 0 })
     }
     fn shift_analysis(&self, extension: &str, bytes: &[u8], offset_ms: i64) -> std::io::Result<Vec<u8>> {
@@ -131,4 +133,70 @@ fn a_converter_and_compatibility_together_are_refused() {
     let options = ExportOptions { converter: Some(&fake), compatibility: Some(rbl_export::CompatibilityFormat::Wav), ..Default::default() };
     let error = export_with_options(dest.path(), &[track(src.path(), 1, "First.wav")], &[], &[], &options, &mut |_| {}).unwrap_err();
     assert!(matches!(error, rbl_export::ExportError::Conflict(_)), "{error}");
+}
+
+fn row_size(dest: &Path, audio: &str) -> u32 {
+    let bytes = std::fs::read(dest.join("PIONEER/rekordbox/export.pdb")).unwrap();
+    let pdb = rbl_pdb::Pdb::parse(&bytes).unwrap();
+    pdb.track_rows(pdb.table(rbl_pdb::PageType::Tracks).unwrap()).iter().find(|r| r.file_path == audio).unwrap().file_size
+}
+
+#[test]
+fn a_converted_name_never_lands_on_another_file() {
+    let src = tempfile::tempdir().unwrap();
+    let dest = common::stick();
+    let tracks = vec![track(src.path(), 1, "First.wav")];
+    export_with_options(dest.path(), &tracks, &[], &[], &ExportOptions::default(), &mut |_| {}).unwrap();
+    let wav = entry(&Manifest::load(dest.path()).unwrap(), 1).audio.clone();
+    let theirs = dest.path().join(wav.trim_start_matches('/')).with_extension("mp3");
+    std::fs::write(&theirs, b"someone else's").unwrap();
+
+    let fake = Fake::default();
+    let options = ExportOptions { converter: Some(&fake), ..Default::default() };
+    export_with_options(dest.path(), &tracks, &[], &[], &options, &mut |_| {}).unwrap();
+    let converted = entry(&Manifest::load(dest.path()).unwrap(), 1).audio.clone();
+    assert!(converted.ends_with(&format!("/First-{}.mp3", entry(&Manifest::load(dest.path()).unwrap(), 1).export_id)), "{converted}");
+    assert_eq!(std::fs::read(&theirs).unwrap(), b"someone else's");
+
+    export_with_options(dest.path(), &tracks, &[], &[], &options, &mut |_| {}).unwrap();
+    assert_eq!(entry(&Manifest::load(dest.path()).unwrap(), 1).audio, converted, "the name stays put");
+    assert_eq!(fake.conversions.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_moved_conversion_keeps_its_own_size() {
+    let src = tempfile::tempdir().unwrap();
+    let dest = common::stick();
+    let mut tracks = vec![track(src.path(), 1, "First.wav")];
+    let fake = Fake::default();
+    let options = ExportOptions { converter: Some(&fake), ..Default::default() };
+    export_with_options(dest.path(), &tracks, &[], &[], &options, &mut |_| {}).unwrap();
+    tracks[0].artist = "Renamed".into();
+    export_with_options(dest.path(), &tracks, &[], &[], &options, &mut |_| {}).unwrap();
+    assert_eq!(fake.conversions.load(Ordering::SeqCst), 1, "moved, not converted again");
+    let moved = entry(&Manifest::load(dest.path()).unwrap(), 1).audio.clone();
+    assert!(moved.contains("Renamed"), "{moved}");
+    let on_stick = std::fs::metadata(dest.path().join(moved.trim_start_matches('/'))).unwrap().len();
+    assert_eq!(u64::from(row_size(dest.path(), &moved)), on_stick);
+}
+
+#[test]
+fn a_full_stick_while_converting_stops_the_export() {
+    let src = tempfile::tempdir().unwrap();
+    let dest = common::stick();
+    let fake = Fake { fail: Some(std::io::ErrorKind::StorageFull), ..Default::default() };
+    let options = ExportOptions { converter: Some(&fake), ..Default::default() };
+    assert!(export_with_options(dest.path(), &[track(src.path(), 1, "First.wav")], &[], &[], &options, &mut |_| {}).is_err());
+}
+
+#[test]
+fn a_library_file_on_the_stick_is_reviewed_as_a_conversion() {
+    let dest = common::stick();
+    let music = dest.path().join("Music");
+    std::fs::create_dir_all(&music).unwrap();
+    let tracks = vec![track(&music, 1, "First.wav")];
+    let fake = Fake::default();
+    let options = ExportOptions { converter: Some(&fake), ..Default::default() };
+    let plan = rbl_export::review::inspect_volume(dest.path(), &tracks, &[], &[], &options).unwrap().plan.unwrap();
+    assert_eq!((plan.convert, plan.keep), (1, 0));
 }

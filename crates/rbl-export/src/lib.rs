@@ -1282,11 +1282,22 @@ fn export_cancellable_inner(
             let parent = place.audio.rsplit_once('/').map_or("/Contents", |(parent, _)| parent).to_owned();
             let name = match target {
                 Target::Builtin(_) => fat_file_name(&format!("{stem}-rbx-cdj-{export_id}.{}", target.extension())),
-                // The library's own name with the new extension, unless another file would have it.
+                // The library's own name with the new extension, unless another file has or will have it.
                 Target::External(_) => {
-                    let renamed = fat_file_name(&format!("{stem}.{}", target.extension()));
-                    let taken = |name: &str| { let key = path_key(&format!("{parent}/{name}")); layout_paths.contains(&key) || written_audio_paths.contains(&key) };
-                    if taken(&renamed) { fat_file_name(&format!("{stem}-{export_id}.{}", target.extension())) } else { renamed }
+                    let own = stale.get(&key).map(|old| path_key(&old.audio));
+                    let taken = |name: &str| {
+                        let path = format!("{parent}/{name}");
+                        let candidate = path_key(&path);
+                        layout_paths.contains(&candidate) || written_audio_paths.contains(&candidate)
+                            || (own.as_ref() != Some(&candidate) && under(destination, &path).exists())
+                    };
+                    let extension = target.extension();
+                    std::iter::once(format!("{stem}.{extension}"))
+                        .chain(std::iter::once(format!("{stem}-{export_id}.{extension}")))
+                        .chain((1..=u32::MAX).map(|n| format!("{stem}-{export_id}-{n}.{extension}")))
+                        .map(|name| fat_file_name(&name))
+                        .find(|name| !taken(name))
+                        .unwrap_or_default()
                 }
             };
             place.audio = format!("{parent}/{name}");
@@ -1411,10 +1422,14 @@ fn export_cancellable_inner(
         if absent {
             output_size = size;
         } else if retained_audio || moved.is_some() {
-            output_size = size;
+            // A relocated conversion is the stick's file, not the source's size.
+            output_size = match moved.filter(|_| conversion.is_some()) {
+                Some(old) => std::fs::metadata(under(destination, &old.audio))?.len(),
+                None => size,
+            };
             conversion_info = moved.and_then(|c| c.conversion_info);
             report.reused += 1;
-            report.bytes_reused += size;
+            report.bytes_reused += output_size;
         } else if in_place {
             output_size = size;
             report.reused += 1;
@@ -1442,7 +1457,6 @@ fn export_cancellable_inner(
                     progress(&ExportProgress { stage: "converting", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: tracks.len(), ..Default::default() });
                     converter.convert(&track.source_path, &audio_dest)
                         .and_then(|made| { conversion_info = Some(made); std::fs::metadata(&audio_dest).map(|m| m.len()) })
-                        .map_err(|e| std::io::Error::other(format!("{}: {e}", track.title)))
                 }
                 Some(Target::Builtin(target)) => {
                     report.converted += 1;
@@ -1503,11 +1517,7 @@ fn export_cancellable_inner(
         }
 
         let conversion_info = conversion_info.filter(|_| external);
-        // The stick's analysis is moved by the conversion, so a different one rewrites it.
-        let converted_recipe = |recipe: String| match conversion_info {
-            Some(made) => incremental::digest(&(recipe, profile, made.offset_ms)),
-            None => Ok(recipe),
-        };
+        let converted_recipe = |recipe: String| incremental::converted_recipe(recipe, profile, conversion_info);
         let recipe = converted_recipe(incremental::analysis_recipe(track, &place.audio)?)?;
         analysis_recipes.insert(key.clone(), recipe.clone());
         let comparison_recipe = if source_contents_unchanged.contains(&key) {

@@ -253,6 +253,14 @@ pub fn analysis_recipe(track: &SourceTrack, audio: &str) -> Result<String> {
     analysis_recipe_with_revision(track, audio, &revision(&track.source_path)?)
 }
 
+/// `recipe` for analysis a caller's conversion moved, so a different conversion rewrites it.
+pub fn converted_recipe(recipe: String, profile: &str, conversion: Option<crate::ConvertedAudio>) -> Result<String> {
+    match conversion {
+        Some(made) => digest(&(recipe, profile, made.offset_ms)),
+        None => Ok(recipe),
+    }
+}
+
 pub fn analysis_recipe_with_revision(track: &SourceTrack, audio: &str, audio_revision: &Option<FileRevision>) -> Result<String> {
     let revisions = track.analysis_source.as_ref().map(|base| {
         ["DAT", "EXT", "2EX"].map(|ext| Ok((ext, revision(&base.with_extension(ext))?))).into_iter()
