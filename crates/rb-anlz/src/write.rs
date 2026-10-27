@@ -1,6 +1,10 @@
 //! Changing analysis files: swapping tags in place and building the path tag.
 
-use crate::decode::TAG_HEADER;
+use crate::build::DETAIL_RATE;
+use crate::decode::{self, Tags, TAG_HEADER};
+
+/// Detail waveforms: one entry per column, at the rate the tag's header names.
+const DETAIL_WAVES: [&str; 3] = ["PWV3", "PWV5", "PWV7"];
 
 /// The `PPTH` tag holding the audio file's path as the analysis files record it.
 #[must_use]
@@ -88,6 +92,80 @@ pub fn clear_extended_beatgrid(tag: &[u8]) -> Vec<u8> {
     header
 }
 
+/// The tags of one analysis file rebuilt for audio whose timeline moved by `offset_ms`: beats move by the
+/// offset (any that would land before 0 are dropped) and detail waveforms by whole columns, silent ones
+/// filling the start or the earliest dropped. The extended grid is cleared. Preview waveforms span the
+/// whole track and are kept: a delay is far less than one of their columns.
+#[must_use]
+pub fn timeline_patches(tags: &Tags, offset_ms: i64) -> Vec<(&'static str, Vec<u8>)> {
+    if offset_ms == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let (Some(grid), Some(pqtz)) = (decode::beatgrid(tags), tags.first("PQTZ")) {
+        let keep: Vec<usize> = (0..grid.times.len()).filter(|i| i64::from(grid.times[*i]) + offset_ms >= 0).collect();
+        if !keep.is_empty() {
+            let times: Vec<u32> = keep.iter().map(|i| u32::try_from(i64::from(grid.times[*i]) + offset_ms).unwrap_or(u32::MAX)).collect();
+            let beats: Vec<u16> = keep.iter().map(|i| grid.beats[*i]).collect();
+            let bpms: Vec<f64> = keep.iter().map(|i| grid.bpms[*i]).collect();
+            out.push(("PQTZ", build_beatgrid(pqtz, &times, &beats, &bpms)));
+        }
+    }
+    if let Some(pqt2) = tags.first("PQT2") {
+        out.push(("PQT2", clear_extended_beatgrid(pqt2)));
+    }
+    for kind in DETAIL_WAVES {
+        if let Some(shifted) = tags.first(kind).and_then(|tag| shift_columns(tag, offset_ms)) {
+            out.push((kind, shifted));
+        }
+    }
+    out
+}
+
+/// `data`, an analysis file, with [`timeline_patches`] applied.
+pub fn shift_timeline(data: &[u8], offset_ms: i64) -> std::io::Result<Vec<u8>> {
+    if offset_ms == 0 {
+        return Ok(data.to_vec());
+    }
+    let patches = timeline_patches(&Tags::parse(data.to_vec())?, offset_ms);
+    patch_tags(data, &patches, &[])
+}
+
+/// A detail waveform tag moved by `offset_ms`, rounded to whole columns. `None` when it doesn't move or
+/// its header can't be read.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss, reason = "a delay of a few seconds at most")]
+fn shift_columns(tag: &[u8], offset_ms: i64) -> Option<Vec<u8>> {
+    let word = |at: usize| tag.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let len_header = word(4)?;
+    let width = word(12)?;
+    if len_header < 24 || len_header > tag.len() || width == 0 {
+        return None;
+    }
+    let rate = match word(20)? >> 16 {
+        0 => DETAIL_RATE as usize,
+        rate => rate,
+    };
+    let columns = (offset_ms as f64 * rate as f64 / 1000.0).round() as i64;
+    if columns == 0 {
+        return None;
+    }
+    let body = &tag[len_header..];
+    let body = &body[..word(16)?.min(body.len() / width) * width];
+    let moved = usize::try_from(columns.unsigned_abs()).ok()? * width;
+    let mut out = tag[..len_header].to_vec();
+    if columns > 0 {
+        out.resize(len_header + moved, 0);
+        out.extend(body);
+    } else {
+        out.extend(&body[moved.min(body.len())..]);
+    }
+    let total = u32::try_from(out.len()).ok()?;
+    let count = u32::try_from((out.len() - len_header) / width).ok()?;
+    out[8..12].copy_from_slice(&total.to_be_bytes());
+    out[16..20].copy_from_slice(&count.to_be_bytes());
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,6 +243,76 @@ mod tests {
     #[test]
     fn refuses_other_files() {
         assert!(replace_tags(b"nope", &[]).is_err());
+    }
+
+    fn detail(kind: &str, width: u32, body: &[u8]) -> Vec<u8> {
+        let mut t = kind.as_bytes().to_vec();
+        t.extend(24u32.to_be_bytes());
+        t.extend(u32::try_from(24 + body.len()).unwrap().to_be_bytes());
+        t.extend(width.to_be_bytes());
+        t.extend(u32::try_from(body.len()).unwrap().checked_div(width).unwrap().to_be_bytes());
+        t.extend((150u32 << 16).to_be_bytes());
+        t.extend(body);
+        t
+    }
+
+    fn entries(tags: &Tags, kind: &str) -> (u32, Vec<u8>) {
+        let tag = tags.first(kind).unwrap();
+        (u32::from_be_bytes(tag[16..20].try_into().unwrap()), tag[24..].to_vec())
+    }
+
+    fn shifted(offset_ms: i64) -> Tags {
+        let grid = crate::build::beatgrid_tag(&[(1, 12800, 10), (2, 12800, 479), (3, 12800, 948)]);
+        let data = file(&[
+            grid,
+            detail("PWV3", 1, &[1, 2, 3, 4, 5]),
+            detail("PWV5", 2, &[1, 1, 2, 2, 3, 3]),
+            detail("PWV7", 3, &[1, 1, 1, 2, 2, 2]),
+            detail("PWV4", 6, &[9; 12]),
+        ]);
+        Tags::parse(shift_timeline(&data, offset_ms).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_later_timeline_moves_beats_and_pads_detail_waveforms() {
+        let tags = shifted(23);
+        let grid = decode::beatgrid(&tags).unwrap();
+        assert_eq!(grid.times, [33, 502, 971]);
+        assert_eq!(grid.beats, [1, 2, 3]);
+        // 23 ms is 3.45 columns at 150 a second.
+        assert_eq!(entries(&tags, "PWV3"), (8, vec![0, 0, 0, 1, 2, 3, 4, 5]));
+        assert_eq!(entries(&tags, "PWV5"), (6, [vec![0; 6], vec![1, 1, 2, 2, 3, 3]].concat()));
+        assert_eq!(entries(&tags, "PWV7"), (5, [vec![0; 9], vec![1, 1, 1, 2, 2, 2]].concat()));
+        assert_eq!(tags.first("PWV4").unwrap(), detail("PWV4", 6, &[9; 12]).as_slice());
+    }
+
+    #[test]
+    fn an_earlier_timeline_drops_what_falls_before_the_start() {
+        let tags = shifted(-20);
+        let grid = decode::beatgrid(&tags).unwrap();
+        assert_eq!(grid.times, [459, 928]);
+        assert_eq!(grid.beats, [2, 3]);
+        assert_eq!(entries(&tags, "PWV3"), (2, vec![4, 5]));
+        assert_eq!(entries(&tags, "PWV5"), (0, Vec::new()));
+        assert_eq!(entries(&tags, "PWV7"), (0, Vec::new()));
+    }
+
+    #[test]
+    fn no_offset_changes_nothing() {
+        let data = file(&[detail("PWV3", 1, &[1, 2]), other("PQT2")]);
+        assert_eq!(shift_timeline(&data, 0).unwrap(), data);
+        assert!(timeline_patches(&Tags::parse(data).unwrap(), 0).is_empty());
+        // Under half a column the waveforms stay put.
+        let tags = Tags::parse(file(&[detail("PWV3", 1, &[1, 2])])).unwrap();
+        assert!(timeline_patches(&tags, 3).is_empty());
+    }
+
+    #[test]
+    fn the_empty_seek_table_is_rekordbox_sized() {
+        let vbr = crate::build::empty_vbr_tag();
+        assert_eq!(&vbr[..4], b"PVBR");
+        assert_eq!(u32::from_be_bytes(vbr[8..12].try_into().unwrap()), 1620);
+        assert!(vbr[12..].iter().all(|b| *b == 0));
     }
 
     #[test]
