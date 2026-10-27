@@ -104,14 +104,13 @@ pub fn timeline_patches(tags: &Tags, offset_ms: i64) -> Vec<(&'static str, Vec<u
     let mut out = Vec::new();
     if let (Some(grid), Some(pqtz)) = (decode::beatgrid(tags), tags.first("PQTZ")) {
         let keep: Vec<usize> = (0..grid.times.len()).filter(|i| i64::from(grid.times[*i]) + offset_ms >= 0).collect();
-        if !keep.is_empty() {
-            let times: Vec<u32> = keep.iter().map(|i| u32::try_from(i64::from(grid.times[*i]) + offset_ms).unwrap_or(u32::MAX)).collect();
-            let beats: Vec<u16> = keep.iter().map(|i| grid.beats[*i]).collect();
-            let bpms: Vec<f64> = keep.iter().map(|i| grid.bpms[*i]).collect();
-            out.push(("PQTZ", build_beatgrid(pqtz, &times, &beats, &bpms)));
-        }
+        let times: Vec<u32> = keep.iter().map(|i| u32::try_from(i64::from(grid.times[*i]) + offset_ms).unwrap_or(u32::MAX)).collect();
+        let beats: Vec<u16> = keep.iter().map(|i| grid.beats[*i]).collect();
+        let bpms: Vec<f64> = keep.iter().map(|i| grid.bpms[*i]).collect();
+        out.push(("PQTZ", build_beatgrid(pqtz, &times, &beats, &bpms)));
     }
-    if let Some(pqt2) = tags.first("PQT2") {
+    let header_fits = |tag: &[u8]| tag.get(4..8).is_some_and(|b| (24..=tag.len()).contains(&(u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)));
+    if let Some(pqt2) = tags.first("PQT2").filter(|tag| header_fits(tag)) {
         out.push(("PQT2", clear_extended_beatgrid(pqt2)));
     }
     for kind in DETAIL_WAVES {
@@ -295,6 +294,15 @@ mod tests {
         assert_eq!(entries(&tags, "PWV3"), (2, vec![4, 5]));
         assert_eq!(entries(&tags, "PWV5"), (0, Vec::new()));
         assert_eq!(entries(&tags, "PWV7"), (0, Vec::new()));
+    }
+
+    #[test]
+    fn a_grid_moved_wholly_before_the_start_is_emptied_and_a_malformed_extended_grid_is_left() {
+        let tags = shifted(-1000);
+        assert_eq!(decode::beatgrid(&tags).map_or(0, |grid| grid.times.len()), 0);
+        let data = file(&[other("PQT2")]);
+        let kept = Tags::parse(shift_timeline(&data, 23).unwrap()).unwrap();
+        assert_eq!(kept.first("PQT2").unwrap(), other("PQT2").as_slice());
     }
 
     #[test]
