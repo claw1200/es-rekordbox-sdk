@@ -80,6 +80,39 @@ fn moving_playlists_reorders_and_updates_folder_parent() {
 }
 
 #[test]
+fn moving_root_playlists_ignores_hidden_row_and_null_parents() {
+    let mut s = scene();
+    let hidden = "100000";
+    let before: (Option<i64>, Option<i64>, Option<String>) = {
+        let conn = fixture::connect(s.lib.path()).unwrap();
+        Rows(&conn).playlist(hidden, "Cloud sync", 0).unwrap();
+        conn.execute("UPDATE djmdPlaylist SET ParentID = NULL WHERE ID IN ('10', '11', ?1)", [hidden]).unwrap();
+        conn.execute("UPDATE djmdPlaylist SET Seq = 0 WHERE ID = ?1", [hidden]).unwrap();
+        conn.query_row(
+            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
+            [hidden],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    };
+
+    s.lib.write(|tx| tx.move_playlist("11", "root", 0)).unwrap();
+
+    let mut visible: Vec<_> = s.lib.playlists().unwrap().into_iter().filter(|node| node.parent_id == "root").collect();
+    visible.sort_by_key(|node| node.seq);
+    assert_eq!(visible.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), ["11", "10"]);
+    let conn = fixture::connect(s.lib.path()).unwrap();
+    let after: (Option<i64>, Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
+            [hidden],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
 fn moving_a_folder_into_its_descendant_or_a_playlist_is_refused() {
     let mut s = scene();
     let inner_folder = s.lib.write(|tx| tx.create_playlist("Inner folder", Some("11"), true, &[])).unwrap();

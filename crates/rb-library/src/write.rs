@@ -503,10 +503,12 @@ impl Tx<'_> {
         }
 
         let mut source_statement = self.tx.prepare(
-            "SELECT ID FROM djmdPlaylist WHERE ParentID = ?1 AND rb_local_deleted = 0 ORDER BY Seq, ID",
+            "SELECT ID FROM djmdPlaylist
+             WHERE COALESCE(NULLIF(ParentID, ''), 'root') = ?1 AND ID <> ?2 AND rb_local_deleted = 0
+             ORDER BY Seq, ID",
         )?;
         let source_order: Vec<String> = source_statement
-            .query_map([&old_parent], |row| row.get(0))?
+            .query_map(params![old_parent, HIDDEN_PLAYLIST], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         drop(source_statement);
 
@@ -514,9 +516,11 @@ impl Tx<'_> {
             source_order.iter().filter(|id| id.as_str() != playlist_id).cloned().collect()
         } else {
             let mut statement = self.tx.prepare(
-                "SELECT ID FROM djmdPlaylist WHERE ParentID = ?1 AND rb_local_deleted = 0 ORDER BY Seq, ID",
+                "SELECT ID FROM djmdPlaylist
+                 WHERE COALESCE(NULLIF(ParentID, ''), 'root') = ?1 AND ID <> ?2 AND rb_local_deleted = 0
+                 ORDER BY Seq, ID",
             )?;
-            let rows = statement.query_map([parent], |row| row.get(0))?;
+            let rows = statement.query_map(params![parent, HIDDEN_PLAYLIST], |row| row.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let at = index.min(destination_order.len());
