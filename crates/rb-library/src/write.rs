@@ -460,6 +460,107 @@ impl Tx<'_> {
         Ok(id)
     }
 
+    /// Move a playlist or folder to a folder, or reorder it among its siblings.
+    /// `index` is zero-based; an index beyond the sibling count appends it.
+    pub fn move_playlist(&mut self, playlist_id: &str, parent: &str, index: usize) -> Result<()> {
+        if playlist_id == HIDDEN_PLAYLIST {
+            return Err(Error::NotFound(format!("playlist {playlist_id}")));
+        }
+
+        let old_parent = match self.tx.query_row(
+            "SELECT COALESCE(ParentID, 'root') FROM djmdPlaylist WHERE ID = ?1 AND rb_local_deleted = 0",
+            [playlist_id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(parent) => parent,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(Error::NotFound(format!("playlist {playlist_id}"))),
+            Err(error) => return Err(error.into()),
+        };
+        let parent = if parent.is_empty() { "root" } else { parent };
+        if parent != "root" {
+            let folder = self.tx.query_row(
+                "SELECT Attribute FROM djmdPlaylist WHERE ID = ?1 AND rb_local_deleted = 0",
+                [parent],
+                |row| row.get::<_, Option<i64>>(0),
+            );
+            if !matches!(folder, Ok(Some(1))) {
+                return Err(Error::Refused("the destination does not exist or is not a folder".into()));
+            }
+            let contains_source: bool = self.tx.query_row(
+                "WITH RECURSIVE ancestors(id) AS (
+                    SELECT ?1
+                    UNION
+                    SELECT p.ParentID FROM djmdPlaylist p JOIN ancestors a ON p.ID = a.id
+                    WHERE p.rb_local_deleted = 0 AND p.ParentID != 'root'
+                )
+                SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?2)",
+                params![parent, playlist_id],
+                |row| row.get(0),
+            )?;
+            if contains_source {
+                return Err(Error::Refused("that would put a folder inside itself".into()));
+            }
+        }
+
+        let mut source_statement = self.tx.prepare(
+            "SELECT ID FROM djmdPlaylist
+             WHERE COALESCE(NULLIF(ParentID, ''), 'root') = ?1 AND ID <> ?2 AND rb_local_deleted = 0
+             ORDER BY Seq, ID",
+        )?;
+        let source_order: Vec<String> = source_statement
+            .query_map(params![old_parent, HIDDEN_PLAYLIST], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(source_statement);
+
+        let mut destination_order: Vec<String> = if old_parent == parent {
+            source_order.iter().filter(|id| id.as_str() != playlist_id).cloned().collect()
+        } else {
+            let mut statement = self.tx.prepare(
+                "SELECT ID FROM djmdPlaylist
+                 WHERE COALESCE(NULLIF(ParentID, ''), 'root') = ?1 AND ID <> ?2 AND rb_local_deleted = 0
+                 ORDER BY Seq, ID",
+            )?;
+            let rows = statement.query_map(params![parent, HIDDEN_PLAYLIST], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let at = index.min(destination_order.len());
+        destination_order.insert(at, playlist_id.to_owned());
+        if old_parent == parent && destination_order == source_order {
+            return Ok(());
+        }
+
+        if old_parent != parent {
+            for (position, id) in source_order.iter().filter(|id| id.as_str() != playlist_id).enumerate() {
+                let wanted = i64::try_from(position + 1).unwrap_or(i64::MAX);
+                let current: i64 = self.tx.query_row("SELECT Seq FROM djmdPlaylist WHERE ID = ?1", [id], |row| row.get(0))?;
+                if current != wanted {
+                    self.tx.execute("UPDATE djmdPlaylist SET Seq = ?1 WHERE ID = ?2", params![wanted, id])?;
+                    self.stamp("djmdPlaylist", id)?;
+                }
+            }
+        }
+
+        for (position, id) in destination_order.iter().enumerate() {
+            let wanted = i64::try_from(position + 1).unwrap_or(i64::MAX);
+            let current: (String, i64) = self.tx.query_row(
+                "SELECT COALESCE(ParentID, 'root'), Seq FROM djmdPlaylist WHERE ID = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if current.0 != parent || current.1 != wanted {
+                self.tx.execute(
+                    "UPDATE djmdPlaylist SET ParentID = ?1, Seq = ?2 WHERE ID = ?3",
+                    params![parent, wanted, id],
+                )?;
+                self.stamp("djmdPlaylist", id)?;
+                if id == playlist_id && current.0 != parent {
+                    self.xml.push(XmlOp::Move { id: id.clone(), parent: parent.to_owned() });
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn rename_playlist(&mut self, playlist_id: &str, name: &str) -> Result<()> {
         if playlist_id == HIDDEN_PLAYLIST {
             return Err(Error::NotFound(format!("playlist {playlist_id}")));

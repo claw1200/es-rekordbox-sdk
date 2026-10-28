@@ -61,6 +61,67 @@ fn a_playlist_only_goes_inside_a_folder() {
 }
 
 #[test]
+fn moving_playlists_reorders_and_updates_folder_parent() {
+    let mut s = scene();
+    let inner = s.lib.write(|tx| tx.create_playlist("Inside", Some("11"), false, &[])).unwrap();
+    let after = s.lib.write(|tx| tx.create_playlist("After", None, false, &[])).unwrap();
+
+    s.lib.write(|tx| tx.move_playlist("10", "11", 0)).unwrap();
+    let nodes = s.lib.playlists().unwrap();
+    let moved = nodes.iter().find(|node| node.id == "10").unwrap();
+    assert_eq!((moved.parent_id.as_str(), moved.seq), ("11", 1));
+    assert_eq!(nodes.iter().find(|node| node.id == inner).unwrap().seq, 2);
+    assert!(xml(&s).contains("<NODE Id=\"A\" ParentId=\"B\""));
+
+    s.lib.write(|tx| tx.move_playlist(&after, "root", 0)).unwrap();
+    let nodes = s.lib.playlists().unwrap();
+    assert_eq!(nodes.iter().find(|node| node.id == after).unwrap().seq, 1);
+    assert_eq!(nodes.iter().find(|node| node.id == "11").unwrap().seq, 2);
+}
+
+#[test]
+fn moving_root_playlists_ignores_hidden_row_and_null_parents() {
+    let mut s = scene();
+    let hidden = "100000";
+    let before: (Option<i64>, Option<i64>, Option<String>) = {
+        let conn = fixture::connect(s.lib.path()).unwrap();
+        Rows(&conn).playlist(hidden, "Cloud sync", 0).unwrap();
+        conn.execute("UPDATE djmdPlaylist SET ParentID = NULL WHERE ID IN ('10', '11', ?1)", [hidden]).unwrap();
+        conn.execute("UPDATE djmdPlaylist SET Seq = 0 WHERE ID = ?1", [hidden]).unwrap();
+        conn.query_row(
+            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
+            [hidden],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    };
+
+    s.lib.write(|tx| tx.move_playlist("11", "root", 0)).unwrap();
+
+    let mut visible: Vec<_> = s.lib.playlists().unwrap().into_iter().filter(|node| node.parent_id == "root").collect();
+    visible.sort_by_key(|node| node.seq);
+    assert_eq!(visible.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), ["11", "10"]);
+    let conn = fixture::connect(s.lib.path()).unwrap();
+    let after: (Option<i64>, Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
+            [hidden],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn moving_a_folder_into_its_descendant_or_a_playlist_is_refused() {
+    let mut s = scene();
+    let inner_folder = s.lib.write(|tx| tx.create_playlist("Inner folder", Some("11"), true, &[])).unwrap();
+
+    assert!(matches!(s.lib.write(|tx| tx.move_playlist("11", &inner_folder, 0)), Err(Error::Refused(_))));
+    assert!(matches!(s.lib.write(|tx| tx.move_playlist("10", "10", 0)), Err(Error::Refused(_))));
+}
+
+#[test]
 fn renaming_changes_the_name_and_takes_an_update_count() {
     let mut s = scene();
     s.lib.write(|tx| tx.rename_playlist("10", "Renamed")).unwrap();
