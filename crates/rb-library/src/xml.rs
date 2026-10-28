@@ -3,6 +3,7 @@
 
 pub(crate) enum XmlOp {
     Add { id: String, parent: String, attribute: i64 },
+    Move { id: String, parent: String },
     Remove(String),
     Touch(String),
 }
@@ -34,6 +35,12 @@ pub(crate) fn apply(text: &str, ops: &[XmlOp], now_ms: u128) -> String {
                     *line = replace_timestamp(line, now_ms);
                 }
             }
+            XmlOp::Move { id, parent } => {
+                let start = node_start(id);
+                for line in lines.iter_mut().filter(|l| l.trim_start().starts_with(&start)) {
+                    *line = replace_timestamp(&replace_parent(line, parent), now_ms);
+                }
+            }
             XmlOp::Add { id, parent, attribute } => {
                 let start = node_start(id);
                 if lines.iter().any(|l| l.trim_start().starts_with(&start)) {
@@ -63,6 +70,13 @@ fn replace_timestamp(line: &str, now_ms: u128) -> String {
     format!("{}{now_ms}{}", &line[..start], &line[start + len..])
 }
 
+fn replace_parent(line: &str, parent: &str) -> String {
+    const KEY: &str = "ParentId=\"";
+    let Some(start) = line.find(KEY).map(|i| i + KEY.len()) else { return line.to_owned() };
+    let Some(len) = line[start..].find('"') else { return line.to_owned() };
+    format!("{}{}{}", &line[..start], hex(parent), &line[start + len..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +102,13 @@ mod tests {
         let out = apply(FILE, &[XmlOp::Touch("171".into())], 777);
         assert!(out.contains("<NODE Id=\"AB\" ParentId=\"0\" Attribute=\"1\" Timestamp=\"777\" Lib_Type"));
         assert!(out.contains("Timestamp=\"1\""));
+    }
+
+    #[test]
+    fn moving_changes_the_parent_and_timestamp() {
+        let out = apply(FILE, &[XmlOp::Move { id: "171".into(), parent: "92".into() }], 777);
+        assert!(out.contains("<NODE Id=\"AB\" ParentId=\"5C\" Attribute=\"1\" Timestamp=\"777\" Lib_Type"));
+        assert!(out.contains("<NODE Id=\"5C24CD2\" ParentId=\"0\" Attribute=\"0\" Timestamp=\"1\""));
     }
 
     #[test]

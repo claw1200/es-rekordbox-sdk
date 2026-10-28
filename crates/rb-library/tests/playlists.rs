@@ -61,6 +61,34 @@ fn a_playlist_only_goes_inside_a_folder() {
 }
 
 #[test]
+fn moving_playlists_reorders_and_updates_folder_parent() {
+    let mut s = scene();
+    let inner = s.lib.write(|tx| tx.create_playlist("Inside", Some("11"), false, &[])).unwrap();
+    let after = s.lib.write(|tx| tx.create_playlist("After", None, false, &[])).unwrap();
+
+    s.lib.write(|tx| tx.move_playlist("10", "11", 0)).unwrap();
+    let nodes = s.lib.playlists().unwrap();
+    let moved = nodes.iter().find(|node| node.id == "10").unwrap();
+    assert_eq!((moved.parent_id.as_str(), moved.seq), ("11", 1));
+    assert_eq!(nodes.iter().find(|node| node.id == inner).unwrap().seq, 2);
+    assert!(xml(&s).contains("<NODE Id=\"A\" ParentId=\"B\""));
+
+    s.lib.write(|tx| tx.move_playlist(&after, "root", 0)).unwrap();
+    let nodes = s.lib.playlists().unwrap();
+    assert_eq!(nodes.iter().find(|node| node.id == after).unwrap().seq, 1);
+    assert_eq!(nodes.iter().find(|node| node.id == "11").unwrap().seq, 2);
+}
+
+#[test]
+fn moving_a_folder_into_its_descendant_or_a_playlist_is_refused() {
+    let mut s = scene();
+    let inner_folder = s.lib.write(|tx| tx.create_playlist("Inner folder", Some("11"), true, &[])).unwrap();
+
+    assert!(matches!(s.lib.write(|tx| tx.move_playlist("11", &inner_folder, 0)), Err(Error::Refused(_))));
+    assert!(matches!(s.lib.write(|tx| tx.move_playlist("10", "10", 0)), Err(Error::Refused(_))));
+}
+
+#[test]
 fn renaming_changes_the_name_and_takes_an_update_count() {
     let mut s = scene();
     s.lib.write(|tx| tx.rename_playlist("10", "Renamed")).unwrap();
