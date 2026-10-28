@@ -18,17 +18,20 @@ application-independent `rb-*` APIs layered over it. It does not contain a CLI.
 - `rb-usb`: typed inspection, export, and explicit recovery service.
 - `rbl-*`: tested format codecs, database builders/readers, and export engine.
 
-The `rbl-db`, `rbl-index`, `rbl-analysis`, and `rbl-devices` crates support
-upstream-derived tests and examples; they are not production dependencies of the
-SDK facade.
+The `rbl-db`, `rbl-index`, `rbl-analysis`, and `rbl-devices` crates are retained
+because upstream-derived tests and examples for shipped crates use their
+fixtures and helper implementations. They are not user-facing SDK capabilities,
+and their standalone suites are excluded from standard SDK validation.
 
 ## Build And Test
 
 Requires Rust 1.89 or newer.
 
 ```sh
-cargo check --workspace --locked
-cargo test --workspace --locked
+cargo check --workspace --locked --exclude rbl-analysis --exclude rbl-db \
+	--exclude rbl-devices --exclude rbl-index
+cargo test --workspace --locked --exclude rbl-analysis --exclude rbl-db \
+	--exclude rbl-devices --exclude rbl-index
 node check-layers.mjs
 node check-upstream.mjs /path/to/rbxport-at-pinned-commit
 ```

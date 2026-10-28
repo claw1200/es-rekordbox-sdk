@@ -95,9 +95,18 @@ reconciliation.
 
 ## Validation
 
-From the repository root, run `cargo test --workspace --locked`,
-`node check-layers.mjs`, and `node check-upstream.mjs /path/to/rbxport`. The
-workspace tests do not require the Export Studio helper. The layer gate ensures
+From the repository root, run the standard SDK checks:
+
+```sh
+cargo test --workspace --locked --exclude rbl-analysis --exclude rbl-db --exclude rbl-devices --exclude rbl-index
+node check-layers.mjs
+node check-upstream.mjs /path/to/rbxport
+```
+
+The four test-support crates remain workspace members because imported tests and
+examples use their fixtures and helper implementations. They are not user-facing
+SDK capabilities, and their standalone suites are excluded from this gate. The
+SDK tests do not require the Export Studio helper. The layer gate ensures
 SDK crates cannot depend on app crates at runtime, the model has no I/O
 dependencies, and USB export cannot depend on master-library implementations.
 Fixtures, filesystem checks, emulator results and physical-device compatibility
