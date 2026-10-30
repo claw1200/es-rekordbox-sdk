@@ -4,6 +4,7 @@ pub mod model;
 pub mod paths;
 pub mod read;
 pub mod selection;
+pub mod settings;
 pub mod volumes;
 
 pub use model::{Cue, Device, History, LibraryKind, Playlist, Track};
