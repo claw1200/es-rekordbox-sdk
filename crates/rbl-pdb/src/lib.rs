@@ -24,6 +24,8 @@ pub enum PdbError {
     BadPageSize(u32),
     #[error("page {0} is past the end of the file")]
     PageOutOfRange(u32),
+    #[error("invalid DeviceSQL structure: {0}")]
+    InvalidStructure(String),
 }
 
 pub type Result<T> = std::result::Result<T, PdbError>;
@@ -156,6 +158,53 @@ fn row_index_len(page: &[u8]) -> u32 {
 }
 
 impl<'a> Pdb<'a> {
+    /// Validate the complete table directory and live page chains before reading settings.
+    pub fn parse_strict(bytes: &'a [u8]) -> Result<Self> {
+        let pdb = Self::parse(bytes)?;
+        let page_size = pdb.page_size as usize;
+        let declared = u4(bytes, 8) as usize;
+        if declared > 64 || declared != pdb.tables.len() || 28 + declared * 16 > page_size
+            || !bytes.len().is_multiple_of(page_size) {
+            return Err(PdbError::InvalidStructure("Truncated or unsupported table directory/pages".into()));
+        }
+        let mut kinds = std::collections::BTreeSet::new();
+        for table in &pdb.tables {
+            if !kinds.insert(table.page_type) {
+                return Err(PdbError::InvalidStructure("Duplicate table kind".into()));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            let mut index = table.first_page;
+            loop {
+                if index == 0 || !seen.insert(index) {
+                    return Err(PdbError::InvalidStructure("Invalid or cyclic page chain".into()));
+                }
+                let offset = pdb.page_offset(index).ok_or(PdbError::PageOutOfRange(index))?;
+                let page = &bytes[offset..offset + page_size];
+                if u4(page, 4) != index || PageType::from_u32(u4(page, 8)) != table.page_type {
+                    return Err(PdbError::InvalidStructure("Page identity does not match its table".into()));
+                }
+                if u1(page, 0x1b) & 0x40 == 0 {
+                    let count = row_index_len(page) as usize;
+                    let footer = count.div_ceil(16) * 0x24;
+                    if footer > page_size - PAGE_HEADER_LEN {
+                        return Err(PdbError::InvalidStructure("Row index overlaps the page header".into()));
+                    }
+                    let heap_end = page_size - footer;
+                    for row in 0..count {
+                        let base = page_size - (row / 16) * 0x24;
+                        if u2(page, base - 4) & (1 << (row % 16)) != 0
+                            && PAGE_HEADER_LEN + usize::from(u2(page, base - 6 - 2 * (row % 16))) >= heap_end {
+                            return Err(PdbError::InvalidStructure("Live row points outside the page heap".into()));
+                        }
+                    }
+                }
+                if index == table.last_page { break; }
+                index = u4(page, 0x0c);
+            }
+        }
+        Ok(pdb)
+    }
+
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         if bytes.len() < 28 {
             return Err(PdbError::TooSmall);
@@ -577,6 +626,30 @@ impl Pdb<'_> {
             created_date: self.string_at(date_at),
             background_color: self.u1_at(row, rows::PROPERTY_COLOR_AT),
         })
+    }
+
+    /// Distinguish absent property settings from malformed or unsupported live rows.
+    pub fn property_strict(&self) -> Result<Option<rows::PdbProperty>> {
+        let Some(table) = self.table(PageType::Property) else { return Ok(None) };
+        let live = self.rows(table);
+        let Some(row) = live.last() else { return Ok(None) };
+        let invalid = || PdbError::InvalidStructure("Malformed or unsupported property row".into());
+        let property = self.property().ok_or_else(invalid)?;
+        let date_at = row.offset + rows::PROPERTY_DATE_AT;
+        let version_at = date_at + self.string_len_at(date_at).ok_or_else(invalid)? + 2;
+        let name_at = version_at + self.string_len_at(version_at).ok_or_else(invalid)?;
+        let end = name_at + self.string_len_at(name_at).ok_or_else(invalid)?;
+        let page = self.bytes.get(row.page_offset..row.page_offset + self.page_size as usize).ok_or_else(invalid)?;
+        let footer = (row_index_len(page) as usize).div_ceil(16) * 0x24;
+        if footer > self.page_size as usize - PAGE_HEADER_LEN { return Err(invalid()); }
+        let bound = live.iter().filter(|next| next.page_offset == row.page_offset && next.offset > row.offset)
+            .map(|next| next.offset).min()
+            .unwrap_or(row.page_offset + self.page_size as usize - footer);
+        if end > bound || property.created_date.len() != 10 || !property.created_date.is_ascii()
+            || !property.db_version.is_ascii() || property.background_color > 8 {
+            return Err(invalid());
+        }
+        Ok(Some(property))
     }
 
     /// The encoded length of the `DeviceSQL` string at `offset`, header

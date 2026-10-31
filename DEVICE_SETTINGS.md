@@ -24,6 +24,11 @@ The port deliberately differs in safety behavior: reads return errors for
 unreadable/unsupported files rather than treating them as absent, and never
 recover implicitly. The snapshot writer rejects stale settings under the
 exclusive lease. Missing mounts and symbolic-link settings paths are refused.
+Display equality compares the encoded state, so saved edits remain reusable
+snapshots. Initially lock-free reads retry under a lease if the first writer
+appears, and the settings publisher refuses pending recovery after obtaining its
+exclusive lease. Strict OneLibrary and PDB codec paths reject decoding failures,
+invalid page chains and unsupported property rows instead of substituting defaults.
 All unknown display bytes (including header/padding) survive a supported edit;
 unknown values of the four editable enums are refused rather than normalized.
 Settings use the shipped export journal, so explicit

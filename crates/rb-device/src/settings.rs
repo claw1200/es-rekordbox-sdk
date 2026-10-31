@@ -41,7 +41,7 @@ pub enum KeyDisplay {
 }
 
 /// The four understood display fields. All other bytes are preserved on write.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DevSetting {
     pub overview: OverviewWaveform,
     pub color: WaveformColor,
@@ -49,6 +49,14 @@ pub struct DevSetting {
     pub position: WaveformPosition,
     file: [u8; 140],
 }
+
+impl PartialEq for DevSetting {
+    fn eq(&self, other: &Self) -> bool {
+        self.encode() == other.encode()
+    }
+}
+
+impl Eq for DevSetting {}
 
 const BODY_AT: usize = 0x68;
 const CHECKSUM_AT: usize = 0x88;
@@ -191,9 +199,24 @@ fn require_recovered(mount_point: &Path) -> Result<(), SettingsError> {
 /// Read-only, under the same shared lease used by device/export readers.
 /// Missing groups are `None`; unreadable or unsupported files are errors.
 pub fn read(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
-    let _lease = durable::read_lease(mount_point)?;
+    read_snapshot(mount_point, read_files)
+}
+
+fn read_snapshot(
+    mount_point: &Path,
+    mut load: impl FnMut(&Path) -> Result<DeviceSettings, SettingsError>,
+) -> Result<DeviceSettings, SettingsError> {
+    let lease = durable::read_lease(mount_point)?;
     require_recovered(mount_point)?;
-    read_files(mount_point)
+    let snapshot = load(mount_point);
+    if lease.is_none() {
+        let retry_lease = durable::read_lease(mount_point)?;
+        if retry_lease.is_some() {
+            require_recovered(mount_point)?;
+            return load(mount_point);
+        }
+    }
+    snapshot
 }
 
 fn read_files(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
@@ -230,7 +253,7 @@ fn read_files(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
     let library_path = root.join("rekordbox/exportLibrary.db");
     let has_one_library = library_path.try_exists()?;
     let library = if has_one_library {
-        Some(StickSettings::read(&library_path)?)
+        Some(StickSettings::read_strict(&library_path)?)
     } else {
         None
     };
@@ -238,9 +261,10 @@ fn read_files(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
     let has_device_library = pdb_path.try_exists()?;
     let device_library_background = if has_device_library {
         let bytes = std::fs::read(pdb_path)?;
-        let pdb = rbl_pdb::Pdb::parse(&bytes)
+        let pdb = rbl_pdb::Pdb::parse_strict(&bytes)
             .map_err(|error| SettingsError::Invalid(error.to_string()))?;
-        pdb.property().map(|property| property.background_color)
+        pdb.property_strict().map_err(|error| SettingsError::Invalid(error.to_string()))?
+            .map(|property| property.background_color)
     } else {
         None
     };
@@ -273,7 +297,7 @@ fn write_inner(
     settings: &DeviceSettings,
 ) -> Result<(), SettingsError> {
     require_recovered(mount_point)?;
-    let publication = Publication::new(mount_point, JOURNAL)?;
+    let publication = Publication::new_unrecovered(mount_point, JOURNAL)?;
     require_recovered(mount_point)?;
     let current = read_files(mount_point)?;
     if expected.is_some_and(|expected| *expected != current) {
@@ -381,8 +405,8 @@ fn updated_pdb(
         })?;
     }
     let pdb =
-        rbl_pdb::Pdb::parse(&next).map_err(|error| SettingsError::Invalid(error.to_string()))?;
-    if let Some(current) = pdb.property() {
+        rbl_pdb::Pdb::parse_strict(&next).map_err(|error| SettingsError::Invalid(error.to_string()))?;
+    if let Some(current) = pdb.property_strict().map_err(|error| SettingsError::Invalid(error.to_string()))? {
         let mut property = current.clone();
         if let Some(library) = library {
             property.device_name.clone_from(&library.device_name);
@@ -398,7 +422,7 @@ fn updated_pdb(
                     SettingsError::Invalid("Cannot update Device Library property".into())
                 })?;
         }
-    } else if background.is_some() {
+    } else if background.is_some() || library.is_some() {
         return Err(SettingsError::Invalid(
             "Device Library has no readable property row".into(),
         ));
@@ -409,6 +433,101 @@ fn updated_pdb(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_pdb_structure_and_property_rows_block_reads_and_writes() {
+        let mut builder = rbl_pdb::build::FileBuilder::new(4096);
+        let property = rbl_pdb::rows::PdbProperty { created_date: "2026-10-31".into(), ..Default::default() };
+        builder.add_table(19, &[rbl_pdb::rows::property_row(&property).unwrap()]);
+        let valid = builder.finish();
+        let parsed = rbl_pdb::Pdb::parse_strict(&valid).unwrap();
+        let table = parsed.table(rbl_pdb::PageType::Property).unwrap();
+        let row = parsed.rows(table)[0];
+        let mut cases = Vec::new();
+        let mut header = vec![0; 28];
+        header[4..8].copy_from_slice(&4096_u32.to_le_bytes());
+        header[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        cases.push(header);
+        cases.push(valid[..valid.len() - 1].to_vec());
+        let mut wrong_type = valid.clone();
+        wrong_type[row.page_offset + 8..row.page_offset + 12].copy_from_slice(&7_u32.to_le_bytes());
+        cases.push(wrong_type);
+        let mut cycle = valid.clone();
+        let first = table.first_page as usize * 4096;
+        cycle[first + 12..first + 16].copy_from_slice(&table.first_page.to_le_bytes());
+        cases.push(cycle);
+        let mut bad_offset = valid.clone();
+        bad_offset[row.page_offset + 4096 - 6..row.page_offset + 4096 - 4].copy_from_slice(&4095_u16.to_le_bytes());
+        cases.push(bad_offset);
+        let mut unknown_property = valid.clone();
+        unknown_property[row.offset] = 0;
+        cases.push(unknown_property);
+        let mut crossed_heap = valid.clone();
+        crossed_heap[row.offset + 12] = 0x40;
+        crossed_heap[row.offset + 13..row.offset + 15].copy_from_slice(&4096_u16.to_le_bytes());
+        cases.push(crossed_heap);
+        for bytes in cases {
+            let volume = tempfile::tempdir().unwrap();
+            let root = volume.path().join("PIONEER/rekordbox");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("export.pdb"), &bytes).unwrap();
+            assert!(read(volume.path()).is_err());
+            let mut desired = read_files(tempfile::tempdir().unwrap().path()).unwrap();
+            desired.dev = Some(DevSetting::default());
+            assert!(write(volume.path(), &desired).is_err());
+            assert_eq!(std::fs::read(root.join("export.pdb")).unwrap(), bytes);
+            assert!(!volume.path().join("PIONEER/DEVSETTING.DAT").exists());
+        }
+    }
+
+    #[test]
+    fn missing_pdb_property_refuses_name_mirroring_atomically() {
+        let volume = tempfile::tempdir().unwrap();
+        rbl_export::create_library(volume.path(), None, &[], None).unwrap();
+        let root = export_root(volume.path());
+        let mut builder = rbl_pdb::build::FileBuilder::new(4096);
+        builder.add_table(6, &[rbl_pdb::rows::color_row(1, "Pink")]);
+        let bytes = builder.finish();
+        std::fs::write(root.join("rekordbox/export.pdb"), &bytes).unwrap();
+        let current = read(volume.path()).unwrap();
+        assert!(current.has_device_library);
+        assert_eq!(current.device_library_background, None);
+        let before = std::fs::read(root.join("rekordbox/exportLibrary.db")).unwrap();
+        let mut next = current.clone();
+        next.dev = Some(DevSetting::default());
+        next.library.as_mut().unwrap().device_name = "NEW NAME".into();
+        assert!(write_changes(volume.path(), &current, &next).unwrap_err().to_string().contains("property row"));
+        assert_eq!(std::fs::read(root.join("rekordbox/exportLibrary.db")).unwrap(), before);
+        assert_eq!(std::fs::read(root.join("rekordbox/export.pdb")).unwrap(), bytes);
+        assert!(!root.join("DEVSETTING.DAT").exists());
+        assert_eq!(read(volume.path()).unwrap(), current);
+    }
+
+    #[test]
+    fn first_writer_during_unlocked_read_causes_a_locked_retry() {
+        for initial_error in [false, true] {
+            let volume = tempfile::tempdir().unwrap();
+            let mut calls = 0;
+            let snapshot = read_snapshot(volume.path(), |path| {
+                calls += 1;
+                let before = read_files(path)?;
+                if calls == 1 {
+                    let mut next = before.clone();
+                    next.dev = Some(DevSetting { color: WaveformColor::Rgb, ..Default::default() });
+                    write_changes(path, &before, &next)?;
+                    if initial_error {
+                        return Err(SettingsError::Invalid("Transient unlocked read failure".into()));
+                    }
+                }
+                Ok(before)
+            }).unwrap();
+            assert_eq!(calls, 2);
+            assert_eq!(snapshot.dev.unwrap().color, WaveformColor::Rgb);
+        }
+        let volume = tempfile::tempdir().unwrap();
+        read(volume.path()).unwrap();
+        assert!(!volume.path().join(".rbxport-write.lock").exists());
+    }
 
     #[test]
     fn captured_rekordbox_display_file_round_trips() {
@@ -451,6 +570,35 @@ mod tests {
         let mut damaged = bytes;
         damaged[110] ^= 1;
         assert!(DevSetting::parse(&damaged).is_none());
+    }
+
+    #[test]
+    fn edited_display_is_a_reusable_snapshot_and_no_op_write() {
+        let volume = tempfile::tempdir().unwrap();
+        let current = read(volume.path()).unwrap();
+        let mut edited = current.clone();
+        edited.dev = Some(DevSetting {
+            color: WaveformColor::Rgb,
+            ..Default::default()
+        });
+        write_changes(volume.path(), &current, &edited).unwrap();
+        assert_eq!(read(volume.path()).unwrap(), edited);
+
+        let path = export_root(volume.path()).join("DEVSETTING.DAT");
+        let marker = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123456);
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(marker)).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        write(volume.path(), &edited).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+
+        let mut next = edited.clone();
+        next.dev.as_mut().unwrap().position = WaveformPosition::Left;
+        write_changes(volume.path(), &edited, &next).unwrap();
+        assert_eq!(read(volume.path()).unwrap(), next);
+        let mut changed_unknown = next.dev.clone().unwrap();
+        changed_unknown.file[BODY_AT + 18] ^= 1;
+        assert_ne!(next.dev.unwrap(), changed_unknown);
     }
 
     #[test]
