@@ -588,6 +588,7 @@ mod tests {
         let marker = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123456);
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.set_times(std::fs::FileTimes::new().set_modified(marker)).unwrap();
+        drop(file);
         let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
         write(volume.path(), &edited).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
