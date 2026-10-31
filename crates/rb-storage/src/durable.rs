@@ -489,10 +489,22 @@ impl Publication {
         Self::retire(root, journal)
     }
     pub fn new(root: &Path, name: &str) -> std::io::Result<Self> {
+        Self::start(root, name, true)
+    }
+
+    /// Refuse pending recovery under the exclusive lease instead of replaying it.
+    pub fn new_unrecovered(root: &Path, name: &str) -> std::io::Result<Self> {
+        Self::start(root, name, false)
+    }
+
+    fn start(root: &Path, name: &str, recover_pending: bool) -> std::io::Result<Self> {
         create_dir_all(root)?;
         let lock = lock(root)?;
         let journal = root.join(name);
         if journal.try_exists()? {
+            if !recover_pending {
+                return Err(std::io::Error::other("Device recovery is required before publication"));
+            }
             Self::finish(root, &journal, true)?;
         }
         // Under the exclusive lock nothing else is using a stage, so any
@@ -1071,6 +1083,31 @@ fn lock(root: &Path) -> std::io::Result<std::fs::File> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unrecovered_constructor_checks_pending_journal_after_waiting_for_lease() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = Publication::new(root.path(), ".journal").unwrap();
+        write(&publication.stage().join("file"), b"next").unwrap();
+        publication.commit_retained(&[PathBuf::from("file")]).unwrap();
+        let intent = std::fs::read(root.path().join(".journal/publication.json")).unwrap();
+        std::thread::scope(|scope| {
+            let (started, received) = std::sync::mpsc::channel();
+            let path = root.path();
+            let waiting = scope.spawn(move || {
+                started.send(()).unwrap();
+                Publication::new_unrecovered(path, ".journal").err().unwrap()
+            });
+            received.recv().unwrap();
+            drop(publication);
+            let error = waiting.join().unwrap();
+            assert!(error.to_string().contains("recovery is required"));
+        });
+        assert!(root.path().join(".journal").exists());
+        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"next");
+        assert_eq!(std::fs::read(root.path().join(".journal/publication.json")).unwrap(), intent);
+        assert!(Publication::validation_pending(root.path(), ".journal"));
+    }
 
     #[test]
     fn root_fingerprint_is_stable_and_distinguishes_test_volumes() {

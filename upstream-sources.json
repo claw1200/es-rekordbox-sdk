@@ -41,8 +41,18 @@
     },
     "crates/rbl-core/src/durable.rs": {
       "upstreamSha256": "01af05bf28d61d57558e31de1985571c263c5cd85cc353335a940a35bfebf10b",
-      "localSha256": "143fcf43301891929ffe98d00cf3f4c8e7234568d9917b3d86a0219e62cee940",
-      "reason": "Relocated to rb-storage; root_fingerprint binds reviews to a mounted filesystem root using stable Windows handle information, with directory rename and path-reuse regression coverage. Tests use writable timestamp handles and portable injected error kinds while retaining platform-specific unsupported-error checks."
+      "localSha256": "5ac368474546bf78c36611dbcaebc0122d8d6f1a3dc12149677f732e76b686a9",
+      "reason": "Relocated to rb-storage; root_fingerprint binds reviews to a mounted filesystem root using stable Windows handle information, with directory rename and path-reuse regression coverage. Tests use writable timestamp handles and portable injected error kinds while retaining platform-specific unsupported-error checks. Add an opt-in non-recovering publication constructor that refuses pending journals under the exclusive lease, with journal-preservation regression coverage."
+    },
+    "crates/rbl-onelibrary/src/settings.rs": {
+      "upstreamSha256": "28c9921687cc7d3cab9b814d6d68f2927a409bbe85daee8e2c1dfd2476bbad72",
+      "localSha256": "212cd27f4e570620df2d2c5095a116eacfc81c1133aef624df8895ba2c867564",
+      "reason": "Add an opt-in strict settings read that propagates query and row-decoding failures while distinguishing an unset sub-column; retain legacy tolerant behavior and test both contracts."
+    },
+    "crates/rbl-pdb/src/lib.rs": {
+      "upstreamSha256": "ea2a970d60ac966600cea7e7176d68f2a1b4d3fb6a3d65e43eada24e0685959f",
+      "localSha256": "ffdbd0226de17596a442be6ada2a30077b25151ad8fc66dffcab27b1e533c2a7",
+      "reason": "Add opt-in strict table-directory, live page-chain and row-offset validation plus a property read that distinguishes absent settings from malformed or unsupported live rows; preserve existing tolerant parser APIs."
     },
     "crates/rbl-db/src/dropbox.rs": {
       "upstreamSha256": "71680d0bb29b902c38f1960aac00a0c8494a09a73c2b17f594c12316976a2bfc",

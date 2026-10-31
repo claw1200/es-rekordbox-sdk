@@ -275,7 +275,7 @@ mod tests {
         std::fs::write(&audio, bytes).unwrap();
         let destination = directory.path().join("USB");
         std::fs::create_dir(&destination).unwrap();
-        let source = Source {
+        let mut source = Source {
             db_id: 4242,
             tracks: vec![Track {
                 id: 7,
@@ -307,6 +307,21 @@ mod tests {
         assert_eq!(device.playlists[0].name, "SDK mix");
         assert!(!destination.join("PIONEER/MYSETTING.DAT").exists());
 
+        let current = rb_device::settings::read(&destination).unwrap();
+        let mut edited = current.clone();
+        edited.dev = Some(rb_device::settings::DevSetting::default());
+        edited.dev.as_mut().unwrap().key_display = rb_device::settings::KeyDisplay::Alphanumeric;
+        let library = edited.library.as_mut().unwrap();
+        library.device_name = "FRIDAY".into();
+        library.background_color_type = 8;
+        library.colors[0].name = "Favorites".into();
+        library.categories[0].visible = false;
+        library.sub_column = None;
+        edited.device_library_background = Some(4);
+        rb_device::settings::write_changes(&destination, &current, &edited).unwrap();
+        let saved = rb_device::settings::read(&destination).unwrap();
+        source.tracks[0].title = "Changed title forces a library rebuild".into();
+
         let settings = directory.path().join("settings");
         std::fs::create_dir(&settings).unwrap();
         std::fs::write(settings.join("MYSETTING.DAT"), b"supplied settings").unwrap();
@@ -321,6 +336,7 @@ mod tests {
             &|| false,
         )
         .unwrap();
+        assert_eq!(rb_device::settings::read(&destination).unwrap(), saved);
         assert_eq!(
             std::fs::read(destination.join("PIONEER/MYSETTING.DAT")).unwrap(),
             b"supplied settings"

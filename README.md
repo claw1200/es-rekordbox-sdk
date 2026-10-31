@@ -12,7 +12,7 @@ application-independent `rb-*` APIs layered over it. It does not contain a CLI.
 - `rb-model`: shared source records, conflict diagnostics, decisions, and plans.
 - `rb-storage`: durable filesystem publication and recovery primitives.
 - `rb-library`: guarded `master.db` access and transactions.
-- `rb-device`: mounted volume discovery and device-library reads.
+- `rb-device`: mounted volume discovery, device-library reads, and device settings.
 - `rb-anlz`: ANLZ file access and parsing helpers.
 - `rb-audio`: where rekordbox's timeline starts in an audio file, read from the file alone.
 - `rb-usb`: typed inspection, export, and explicit recovery service.
@@ -49,6 +49,34 @@ remain blockers; there is no universal force action.
 Manifest v3 stores accepted review decisions with the recoverable generation.
 Versions 1 and 2 remain readable. See [UPSTREAM.md](UPSTREAM.md) for the pinned
 source baseline, local derivations, and license provenance.
+
+## Device Settings
+
+`rb_device::settings::read(volume)` reads display settings from `DEVSETTING.DAT`,
+OneLibrary browse categories/sort order/sub-column, device name and color labels,
+and the Device Library background from `export.pdb`. Missing groups are `None`;
+damaged or unsupported files are errors, not defaults to overwrite. Both
+`PIONEER` and `.PIONEER` roots are supported. The file APIs are platform-independent;
+automatic volume discovery/eject/format in `rb-device` currently use macOS tooling.
+
+Clone the returned `DeviceSettings`, edit supported fields, then call
+`write_changes(volume, &original, &edited)`. It rejects stale settings under the
+exclusive device lease and publishes only changed groups. Unrecognized display
+bytes are preserved; unknown display enum values are refused. `write` is also
+available for callers that intentionally replace the latest settings without an
+earlier snapshot. Neither writer creates a library or deletes absent groups.
+Browse settings require an existing OneLibrary. Device name and color labels are
+mirrored to an existing Device Library; unsupported PDB rewrites fail atomically.
+
+Reads are read-only and refuse pending publication. Use `rb_usb::recover(volume)`
+explicitly before retrying. Settings and exports share its recovery journal and
+storage lease. Callers must also prevent external editors (including rekordbox)
+from writing concurrently; these leases serialize SDK operations, not rekordbox.
+Waveform divisions and MYSETTING/MYSETTING2/DJMMYSETTING player preferences are not
+implemented. This ports the supported settings surface from retained
+`rbl-devices`; it does not remove that crate or complete the inventory in #5.
+See [DEVICE_SETTINGS.md](DEVICE_SETTINGS.md) for the source-linked remaining
+differences and dev/example dependency context.
 
 ## License
 

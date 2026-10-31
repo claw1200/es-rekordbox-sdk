@@ -138,40 +138,53 @@ fn plain(name: &str) -> String {
 impl StickSettings {
     /// Reads the settings out of an existing `exportLibrary.db`, read-only.
     pub fn read(path: &Path) -> Result<Self> {
+        Self::read_with(path, false)
+    }
+
+    /// Read without replacing failed queries or malformed rows with defaults.
+    pub fn read_strict(path: &Path) -> Result<Self> {
+        Self::read_with(path, true)
+    }
+
+    fn read_with(path: &Path, strict: bool) -> Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|source| crate::Error::Open { path: path.display().to_string(), source })?;
         unlock(&conn, &key::passphrase()?)?;
-        Self::read_from(&conn)
+        Self::read_from(&conn, strict)
     }
 
-    fn read_from(conn: &Connection) -> Result<Self> {
-        let (device_name, background_color_type): (String, i64) = conn
-            .query_row(
+    fn read_from(conn: &Connection, strict: bool) -> Result<Self> {
+        let property = conn.query_row(
                 "SELECT COALESCE(deviceName, ''), COALESCE(backGroundColorType, 0)
                  FROM property LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or_default();
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            );
+        let (device_name, background_color_type) = if strict { property? } else { property.unwrap_or_default() };
 
         let slots = |sql: &str| -> Result<Vec<MenuSlot>> {
             let mut stmt = conn.prepare(sql)?;
             let rows = stmt
                 .query_map([], |r| {
+                    let name = r.get::<_, String>(2);
+                    let sequence = r.get::<_, i64>(3);
+                    let visible = r.get::<_, i64>(4);
                     Ok(MenuSlot {
                         id: r.get(0)?,
                         menu_item: r.get(1)?,
-                        name: plain(&r.get::<_, String>(2).unwrap_or_default()),
-                        seq: r.get::<_, i64>(3).unwrap_or(0),
-                        visible: r.get::<_, i64>(4).unwrap_or(0) != 0,
+                        name: plain(&if strict { name? } else { name.unwrap_or_default() }),
+                        seq: if strict { sequence? } else { sequence.unwrap_or(0) },
+                        visible: if strict { visible? } else { visible.unwrap_or(0) } != 0,
                     })
-                })?
-                .filter_map(std::result::Result::ok)
-                .collect();
-            Ok(rows)
+                })?;
+            if strict {
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            } else {
+                Ok(rows.filter_map(std::result::Result::ok).collect())
+            }
         };
         let categories = slots(
             "SELECT c.category_id, c.menuItem_id, COALESCE(m.name, ''), c.sequenceNo, c.isVisible
@@ -183,20 +196,25 @@ impl StickSettings {
              FROM sort s LEFT JOIN menuItem m ON m.menuItem_id = s.menuItem_id
              ORDER BY s.sort_id",
         )?;
-        let sub_column: Option<i64> = conn
+        let selected: rusqlite::Result<i64> = conn
             .query_row(
                 "SELECT menuItem_id FROM sort WHERE isSelectedAsSubColumn = 1
                  ORDER BY sort_id LIMIT 1",
                 [],
                 |r| r.get(0),
-            )
-            .ok();
+            );
+        let sub_column = if strict {
+            match selected {
+                Ok(value) => Some(value),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(error) => return Err(error.into()),
+            }
+        } else { selected.ok() };
 
         let mut stmt = conn.prepare("SELECT color_id, COALESCE(name, '') FROM color ORDER BY color_id")?;
-        let colors = stmt
-            .query_map([], |r| Ok(ColorName { id: r.get(0)?, name: r.get(1)? }))?
-            .filter_map(std::result::Result::ok)
-            .collect();
+        let rows = stmt.query_map([], |r| Ok(ColorName { id: r.get(0)?, name: r.get(1)? }))?;
+        let colors = if strict { rows.collect::<rusqlite::Result<Vec<_>>>()? }
+            else { rows.filter_map(std::result::Result::ok).collect() };
 
         Ok(Self { device_name, background_color_type, categories, sorts, sub_column, colors })
     }
@@ -253,6 +271,54 @@ impl StickSettings {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn settings_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE property(deviceName TEXT, backGroundColorType INTEGER);
+             INSERT INTO property VALUES('Keep this name', 4);
+             CREATE TABLE menuItem(menuItem_id INTEGER, name TEXT);
+             INSERT INTO menuItem VALUES(1, 'TITLE');
+             CREATE TABLE category(category_id INTEGER, menuItem_id INTEGER, sequenceNo INTEGER, isVisible INTEGER);
+             INSERT INTO category VALUES(1, 1, 1, 1);
+             CREATE TABLE sort(sort_id INTEGER, menuItem_id INTEGER, sequenceNo INTEGER, isVisible INTEGER, isSelectedAsSubColumn INTEGER);
+             INSERT INTO sort VALUES(1, 1, 1, 1, 0);
+             CREATE TABLE color(color_id INTEGER, name TEXT);
+             INSERT INTO color VALUES(1, 'Pink');"
+        ).unwrap();
+        conn
+    }
+
+    #[test]
+    fn strict_read_propagates_malformed_settings_and_query_failures() {
+        for sql in [
+            "UPDATE property SET backGroundColorType = 'bad'",
+            "UPDATE category SET sequenceNo = 'bad'",
+            "UPDATE category SET category_id = 'bad'",
+            "UPDATE sort SET isVisible = 'bad'",
+            "UPDATE menuItem SET name = X'ff'",
+            "UPDATE color SET name = X'ff'",
+            "ALTER TABLE sort RENAME COLUMN isSelectedAsSubColumn TO unsupported",
+            "DELETE FROM property",
+        ] {
+            let conn = settings_fixture();
+            conn.execute_batch(sql).unwrap();
+            assert!(StickSettings::read_from(&conn, true).is_err(), "{sql}");
+            assert!(StickSettings::read_from(&conn, false).is_ok(), "legacy read changed: {sql}");
+        }
+    }
+
+    #[test]
+    fn strict_read_allows_a_genuinely_unset_sub_column() {
+        let conn = settings_fixture();
+        let settings = StickSettings::read_from(&conn, true).unwrap();
+        assert_eq!(settings.device_name, "Keep this name");
+        assert_eq!(settings.background_color_type, 4);
+        assert_eq!(settings.sub_column, None);
+        assert_eq!(settings.categories.len(), 1);
+        assert_eq!(settings.sorts.len(), 1);
+        assert_eq!(settings.colors.len(), 1);
+    }
 
     #[test]
     fn the_defaults_are_the_reference_rows() {
