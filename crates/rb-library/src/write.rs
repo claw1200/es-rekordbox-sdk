@@ -460,6 +460,51 @@ impl Tx<'_> {
         Ok(id)
     }
 
+    /// A new history session at the end of the top level, holding `content_ids` in that order. A track
+    /// listed twice is played twice, so repeats are kept. Play counts are left alone: the plays were
+    /// counted where they happened. Returns its id.
+    pub fn create_history(&mut self, name: &str, content_ids: &[String]) -> Result<String> {
+        for id in content_ids {
+            if self.content_state(id)? != Some(false) {
+                return Err(Error::NotFound(format!("live track {id}")));
+            }
+        }
+        let siblings: i64 = self.tx.query_row(
+            "SELECT count(*) FROM djmdHistory WHERE ParentID = 'root' AND rb_local_deleted = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        let id = unused_id(&self.tx, "djmdHistory")?;
+        self.tx.execute(
+            &format!(
+                "INSERT INTO djmdHistory (ID, Seq, Name, Attribute, ParentID, DateCreated, UUID, rb_data_status, \
+                 rb_local_data_status, rb_local_deleted, rb_local_synced, usn, rb_local_usn, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 0, 'root', strftime('%Y-%m-%d %H:%M:%S','now','localtime'), ?4, 0, 0, 0, 0, NULL, \
+                 ?5, {NOW}, {NOW})"
+            ),
+            params![id, siblings + 1, name, Uuid::new_v4().to_string(), self.usn],
+        )?;
+        for (index, content) in content_ids.iter().enumerate() {
+            self.tx.execute(
+                &format!(
+                    "INSERT INTO djmdSongHistory (ID, HistoryID, ContentID, TrackNo, UUID, rb_data_status, \
+                     rb_local_data_status, rb_local_deleted, rb_local_synced, usn, rb_local_usn, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, 0, NULL, ?6, {NOW}, {NOW})"
+                ),
+                params![
+                    Uuid::new_v4().to_string(),
+                    id,
+                    content,
+                    i64::try_from(index + 1).unwrap_or(i64::MAX),
+                    Uuid::new_v4().to_string(),
+                    self.usn
+                ],
+            )?;
+        }
+        self.touched = true;
+        Ok(id)
+    }
+
     /// Move a playlist or folder to a folder, or reorder it among its siblings.
     /// `index` is zero-based; an index beyond the sibling count appends it.
     pub fn move_playlist(&mut self, playlist_id: &str, parent: &str, index: usize) -> Result<()> {
