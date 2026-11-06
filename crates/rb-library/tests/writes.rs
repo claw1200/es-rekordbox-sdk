@@ -156,6 +156,44 @@ fn tracks_cannot_be_added_to_a_smart_playlist() {
 }
 
 #[test]
+fn a_new_history_keeps_its_order_and_repeats_and_is_stamped() {
+    let mut s = scene();
+    let plays: Vec<String> = ["2", "1", "2"].map(String::from).to_vec();
+    let first = s.lib.write(|tx| tx.create_history("HISTORY 001", &plays)).unwrap();
+    let second = s.lib.write(|tx| tx.create_history("HISTORY 002", &[])).unwrap();
+    assert_eq!(counter(&s.lib), 102);
+
+    let nodes = s.lib.histories().unwrap();
+    let made = nodes.iter().find(|n| n.id == first).unwrap();
+    assert_eq!((made.name.as_str(), made.parent_id.as_str(), made.seq, made.is_folder, made.count), ("HISTORY 001", "root", 1, false, Some(3)));
+    assert!(!made.date.is_empty());
+    assert_eq!(nodes.iter().find(|n| n.id == second).unwrap().seq, 2);
+    assert_eq!(s.lib.history_track_ids(&first).unwrap(), plays);
+
+    let conn = fixture::connect(s.lib.path()).unwrap();
+    let stamps: Vec<i64> = conn
+        .prepare("SELECT rb_local_usn FROM djmdSongHistory WHERE HistoryID = ?1")
+        .unwrap()
+        .query_map([&first], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(stamps, [101, 101, 101]);
+    let plays: i64 = conn.query_row("SELECT COALESCE(SUM(DJPlayCount), 0) FROM djmdContent", [], |r| r.get(0)).unwrap();
+    assert_eq!(plays, 0, "importing a history does not count the plays again");
+}
+
+#[test]
+fn a_history_of_a_removed_track_is_refused_and_changes_nothing() {
+    let mut s = scene();
+    s.lib.write(|tx| tx.remove_tracks(&["3".into()])).unwrap();
+    let result = s.lib.write(|tx| tx.create_history("Gig", &["1".into(), "3".into()]));
+    assert!(matches!(result, Err(Error::NotFound(_))));
+    assert!(s.lib.histories().unwrap().is_empty());
+    assert_eq!(counter(&s.lib), 101);
+}
+
+#[test]
 fn a_snapshot_cannot_write() {
     let s = scene();
     let mut snap = Library::open_snapshot(s.lib.path()).unwrap();
