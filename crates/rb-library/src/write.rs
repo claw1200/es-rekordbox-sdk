@@ -883,11 +883,7 @@ impl Tx<'_> {
             let start = clamp_msec(cue.start_ms, length);
             let id = self.insert_cue(content_id, uuid.as_deref(), cue.kind, start)?;
             if let Some(end) = cue.end_ms.filter(|e| *e >= 0) {
-                let end = clamp_msec(end, length);
-                self.tx.execute(
-                    "UPDATE djmdCue SET OutMsec = ?1, OutFrame = ?2 WHERE ID = ?3",
-                    params![end, end * CUE_FRAMES_PER_SECOND / 1000, id],
-                )?;
+                self.set_cue_out(&id, clamp_msec(end, length))?;
             }
             self.tx.execute(
                 "UPDATE djmdCue SET ColorTableIndex = ?1, Comment = ?2, ActiveLoop = ?3 WHERE ID = ?4",
@@ -897,32 +893,54 @@ impl Tx<'_> {
         self.stamp("djmdContent", content_id)
     }
 
-    /// Place a hot cue in slot `kind`, replacing the one already there.
-    pub fn set_hot_cue(&mut self, content_id: &str, kind: i64, msec: i64) -> Result<()> {
+    fn set_cue_out(&mut self, cue_id: &str, end: i64) -> Result<()> {
+        self.tx.execute(
+            "UPDATE djmdCue SET OutMsec = ?1, OutFrame = ?2 WHERE ID = ?3",
+            params![end, end * CUE_FRAMES_PER_SECOND / 1000, cue_id],
+        )?;
+        Ok(())
+    }
+
+    /// A new cue's start and, for a loop, its end, both clamped to the track. A loop that does not
+    /// end after it starts is stored as a plain cue.
+    fn cue_range(msec: i64, end_msec: Option<i64>, length: i64) -> (i64, Option<i64>) {
+        let start = clamp_msec(msec, length);
+        (start, end_msec.map(|end| clamp_msec(end, length)).filter(|end| *end > start))
+    }
+
+    /// Place a hot cue in slot `kind`, replacing the one already there. With `end_msec` it is a loop.
+    pub fn set_hot_cue(&mut self, content_id: &str, kind: i64, msec: i64, end_msec: Option<i64>) -> Result<()> {
         if !HOT_SLOTS.contains(&kind) {
             return Err(Error::Refused(format!("not a hot cue slot: {kind}")));
         }
         let (uuid, length) = self.cue_context(content_id)?;
-        let msec = clamp_msec(msec, length);
+        let (msec, end) = Self::cue_range(msec, end_msec, length);
         self.tx.execute(
             "DELETE FROM djmdCue WHERE ContentID = ?1 AND Kind = ?2 AND rb_local_deleted = 0",
             params![content_id, kind],
         )?;
-        self.insert_cue(content_id, uuid.as_deref(), kind, msec).map(|_| ())
+        let id = self.insert_cue(content_id, uuid.as_deref(), kind, msec)?;
+        if let Some(end) = end {
+            self.set_cue_out(&id, end)?;
+        }
+        Ok(())
     }
 
-    /// Add a memory cue unless one already sits at that time.
-    pub fn add_memory_cue(&mut self, content_id: &str, msec: i64) -> Result<()> {
+    /// Add a memory cue unless the same one is already there. With `end_msec` it is a loop.
+    pub fn add_memory_cue(&mut self, content_id: &str, msec: i64, end_msec: Option<i64>) -> Result<()> {
         let (uuid, length) = self.cue_context(content_id)?;
-        let msec = clamp_msec(msec, length);
+        let (msec, end) = Self::cue_range(msec, end_msec, length);
         let present: i64 = self.tx.query_row(
             "SELECT count(*) FROM djmdCue WHERE ContentID = ?1 AND Kind = 0 AND rb_local_deleted = 0 \
-             AND InMsec = ?2 AND (OutMsec IS NULL OR OutMsec < 0)",
-            params![content_id, msec],
+             AND InMsec = ?2 AND (CASE WHEN OutMsec IS NULL OR OutMsec < 0 THEN -1 ELSE OutMsec END) = ?3",
+            params![content_id, msec, end.unwrap_or(-1)],
             |row| row.get(0),
         )?;
         if present == 0 {
-            self.insert_cue(content_id, uuid.as_deref(), 0, msec)?;
+            let id = self.insert_cue(content_id, uuid.as_deref(), 0, msec)?;
+            if let Some(end) = end {
+                self.set_cue_out(&id, end)?;
+            }
         }
         Ok(())
     }
