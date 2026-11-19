@@ -99,8 +99,69 @@ fn crc16(bytes: &[u8]) -> u16 {
     crc
 }
 
+/// CDJ-2000NXS2 and older players write 0 for the fields they predate.
+const UNSET_BY_OLDER_PLAYERS: u8 = 0;
+
+trait DisplayByte: Copy + PartialEq + Sized + 'static {
+    const AT: usize;
+    const CODES: &'static [(u8, Self)];
+
+    fn decode(byte: u8) -> Option<Self> {
+        Self::CODES
+            .iter()
+            .find(|(code, _)| *code == byte)
+            .map(|(_, value)| *value)
+    }
+
+    fn code(self) -> u8 {
+        Self::CODES
+            .iter()
+            .find(|(_, value)| *value == self)
+            .map(|(code, _)| *code)
+            .expect("every value has a code")
+    }
+
+    fn read(file: &[u8; 140]) -> Option<Self> {
+        Self::decode(file[Self::AT])
+    }
+
+    fn write_unless_equivalent(self, file: &mut [u8; 140]) {
+        if Self::read(file) != Some(self) {
+            file[Self::AT] = self.code();
+        }
+    }
+}
+
+impl DisplayByte for OverviewWaveform {
+    const AT: usize = BODY_AT + 9;
+    const CODES: &'static [(u8, Self)] = &[(1, Self::Half), (2, Self::Full)];
+}
+
+impl DisplayByte for WaveformColor {
+    const AT: usize = BODY_AT + 10;
+    const CODES: &'static [(u8, Self)] = &[(1, Self::Blue), (3, Self::Rgb), (4, Self::TriBand)];
+}
+
+impl DisplayByte for KeyDisplay {
+    const AT: usize = BODY_AT + 12;
+    const CODES: &'static [(u8, Self)] = &[
+        (1, Self::Classic),
+        (2, Self::Alphanumeric),
+        (UNSET_BY_OLDER_PLAYERS, Self::Classic),
+    ];
+}
+
+impl DisplayByte for WaveformPosition {
+    const AT: usize = BODY_AT + 13;
+    const CODES: &'static [(u8, Self)] = &[
+        (1, Self::Center),
+        (2, Self::Left),
+        (UNSET_BY_OLDER_PLAYERS, Self::Center),
+    ];
+}
+
 impl DevSetting {
-    /// Rejects damaged files and unsupported display values instead of normalizing them.
+    /// Rejects damaged files and unknown display values instead of normalizing them.
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         let file: [u8; 140] = bytes.try_into().ok()?;
         if file[..4] != 0x60_u32.to_le_bytes()
@@ -110,50 +171,20 @@ impl DevSetting {
             return None;
         }
         Some(Self {
-            overview: match file[BODY_AT + 9] {
-                1 => OverviewWaveform::Half,
-                2 => OverviewWaveform::Full,
-                _ => return None,
-            },
-            color: match file[BODY_AT + 10] {
-                1 => WaveformColor::Blue,
-                3 => WaveformColor::Rgb,
-                4 => WaveformColor::TriBand,
-                _ => return None,
-            },
-            key_display: match file[BODY_AT + 12] {
-                1 => KeyDisplay::Classic,
-                2 => KeyDisplay::Alphanumeric,
-                _ => return None,
-            },
-            position: match file[BODY_AT + 13] {
-                1 => WaveformPosition::Center,
-                2 => WaveformPosition::Left,
-                _ => return None,
-            },
+            overview: DisplayByte::read(&file)?,
+            color: DisplayByte::read(&file)?,
+            key_display: DisplayByte::read(&file)?,
+            position: DisplayByte::read(&file)?,
             file,
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
         let mut file = self.file;
-        file[BODY_AT + 9] = match self.overview {
-            OverviewWaveform::Half => 1,
-            OverviewWaveform::Full => 2,
-        };
-        file[BODY_AT + 10] = match self.color {
-            WaveformColor::Blue => 1,
-            WaveformColor::Rgb => 3,
-            WaveformColor::TriBand => 4,
-        };
-        file[BODY_AT + 12] = match self.key_display {
-            KeyDisplay::Classic => 1,
-            KeyDisplay::Alphanumeric => 2,
-        };
-        file[BODY_AT + 13] = match self.position {
-            WaveformPosition::Center => 1,
-            WaveformPosition::Left => 2,
-        };
+        self.overview.write_unless_equivalent(&mut file);
+        self.color.write_unless_equivalent(&mut file);
+        self.key_display.write_unless_equivalent(&mut file);
+        self.position.write_unless_equivalent(&mut file);
         let checksum = crc16(&file[BODY_AT..CHECKSUM_AT]);
         file[CHECKSUM_AT..CHECKSUM_AT + 2].copy_from_slice(&checksum.to_le_bytes());
         file.to_vec()
@@ -546,6 +577,31 @@ mod tests {
         let display = DevSetting::parse(&bytes).unwrap();
         assert_eq!(display.color, WaveformColor::TriBand);
         assert_eq!(display.encode(), bytes.to_vec());
+    }
+
+    #[test]
+    fn captured_cdj_2000nxs2_display_file_reads_unset_fields_as_defaults_and_keeps_them() {
+        let bytes: [u8; 140] = [
+            0x60, 0x00, 0x00, 0x00, 0x50, 0x49, 0x4f, 0x4e, 0x45, 0x45, 0x52, 0x20, 0x44, 0x4a,
+            0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x43, 0x44, 0x4a, 0x2d, 0x32, 0x30,
+            0x30, 0x30, 0x4e, 0x58, 0x53, 0x32, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x31, 0x2e,
+            0x38, 0x35, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0xe0, 0x00, 0x00,
+        ];
+        let mut display = DevSetting::parse(&bytes).unwrap();
+        assert_eq!(display.key_display, KeyDisplay::Classic);
+        assert_eq!(display.position, WaveformPosition::Center);
+        assert_eq!(display.color, WaveformColor::Rgb);
+        assert_eq!(display.encode(), bytes.to_vec());
+        display.position = WaveformPosition::Left;
+        let next = display.encode();
+        assert_eq!(next[WaveformPosition::AT], 2);
+        assert_eq!(next[KeyDisplay::AT], UNSET_BY_OLDER_PLAYERS);
     }
 
     #[test]
