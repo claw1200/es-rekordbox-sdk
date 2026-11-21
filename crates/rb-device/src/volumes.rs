@@ -1,13 +1,29 @@
-//! Mounted volumes, and ejecting or formatting a removable one (macOS `diskutil`).
+//! Mounted volumes, and ejecting or formatting a removable one.
 
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::paths::{has_library, ROOT_NAMES};
-use crate::{fail, Error, Result};
+use crate::{fail, Result};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos as platform;
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows as platform;
+
+#[cfg(any(windows, test))]
+mod safe_removal;
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod unsupported;
+#[cfg(not(any(target_os = "macos", windows)))]
+use unsupported as platform;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,40 +40,31 @@ pub struct Volume {
     pub bytes_free: u64,
 }
 
-/// Run a command, killing it when it takes longer than `limit`.
-fn run(program: &str, args: &[&str], limit: Duration) -> std::io::Result<Option<Output>> {
-    let mut child = Command::new(program).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(Some);
+/// A volume as the operating system describes it, before anything on it is read.
+struct Mounted {
+    path: PathBuf,
+    name: String,
+    file_system: String,
+    ejectable: bool,
+}
+
+impl From<Mounted> for Volume {
+    fn from(mounted: Mounted) -> Self {
+        let (bytes_total, bytes_used, bytes_free) = usage(&mounted.path);
+        let path = mounted.path.to_string_lossy().into_owned();
+        Self {
+            id: path.clone(),
+            name: mounted.name,
+            path,
+            has_library: has_library(&mounted.path),
+            ejectable: mounted.ejectable,
+            root_name: root_name(&mounted.path),
+            file_system: mounted.file_system,
+            bytes_total,
+            bytes_used,
+            bytes_free,
         }
-        if started.elapsed() > limit {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(25));
     }
-}
-
-fn disk_info(path: &Path) -> plist::Dictionary {
-    let Ok(Some(out)) = run("diskutil", &["info", "-plist", &path.to_string_lossy()], Duration::from_secs(3)) else {
-        return plist::Dictionary::new();
-    };
-    plist::Value::from_reader(std::io::Cursor::new(out.stdout)).ok().and_then(plist::Value::into_dictionary).unwrap_or_default()
-}
-
-fn flag(info: &plist::Dictionary, key: &str) -> bool {
-    info.get(key).and_then(plist::Value::as_boolean).unwrap_or(false)
-}
-
-fn text(info: &plist::Dictionary, key: &str) -> String {
-    info.get(key).and_then(plist::Value::as_string).unwrap_or_default().to_owned()
-}
-
-fn ejectable(info: &plist::Dictionary) -> bool {
-    (flag(info, "RemovableMedia") || flag(info, "Ejectable")) && !flag(info, "Internal")
 }
 
 fn usage(path: &Path) -> (u64, u64, u64) {
@@ -69,59 +76,35 @@ fn root_name(volume: &Path) -> Option<String> {
     ROOT_NAMES.iter().find(|name| volume.join(name).join("rekordbox").is_dir()).map(|n| (*n).to_owned())
 }
 
-#[cfg(unix)]
-fn device_of(path: &Path) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| m.dev())
+fn folders_in(root: &Path) -> Vec<Mounted> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| Mounted {
+            name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            file_system: String::new(),
+            ejectable: false,
+            path,
+        })
+        .collect()
 }
 
-#[cfg(not(unix))]
-fn device_of(_path: &Path) -> Option<u64> {
-    None
-}
-
-/// Mounted volumes. Scanning the real `/Volumes` skips the boot volume and anything that is neither
-/// removable nor holds a library; a test folder passed as `root` lists every directory.
+/// Mounted volumes worth offering: the system volume never, and otherwise only those that can be
+/// ejected or already hold a library. A test folder passed as `root` lists every directory in it.
 #[must_use]
 pub fn list(root: Option<&Path>) -> Vec<Volume> {
-    let real = root.is_none();
-    let base = root.unwrap_or_else(|| Path::new("/Volumes"));
-    let Ok(entries) = std::fs::read_dir(base) else { return Vec::new() };
-    let boot = if real { device_of(Path::new("/")) } else { None };
-    let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-    paths.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
-    let mut out = Vec::new();
-    for path in paths {
-        let Some(dev) = device_of(&path).or(Some(0)) else { continue };
-        if real && boot == Some(dev) {
-            continue;
-        }
-        let library = has_library(&path);
-        let info = if real { disk_info(&path) } else { plist::Dictionary::new() };
-        let can_eject = real && ejectable(&info);
-        if real && !library && !can_eject {
-            continue;
-        }
-        let (bytes_total, bytes_used, bytes_free) = usage(&path);
-        let file_system = if real {
-            Some(text(&info, "FilesystemName")).filter(|s| !s.is_empty()).unwrap_or_else(|| text(&info, "FilesystemType"))
-        } else {
-            String::new()
-        };
-        out.push(Volume {
-            id: path.to_string_lossy().into_owned(),
-            name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-            path: path.to_string_lossy().into_owned(),
-            has_library: library,
-            ejectable: can_eject,
-            root_name: root_name(&path),
-            file_system,
-            bytes_total,
-            bytes_used,
-            bytes_free,
-        });
-    }
-    out
+    let mut volumes: Vec<Volume> = match root {
+        Some(root) => folders_in(root).into_iter().map(Volume::from).collect(),
+        None => platform::mounted()
+            .into_iter()
+            .map(Volume::from)
+            .filter(|volume| volume.ejectable || volume.has_library)
+            .collect(),
+    };
+    volumes.sort_by_key(|volume| volume.name.to_lowercase());
+    volumes
 }
 
 fn listed<'a>(volume: &Path, volumes: &'a [Volume]) -> Option<&'a Volume> {
@@ -129,13 +112,7 @@ fn listed<'a>(volume: &Path, volumes: &'a [Volume]) -> Option<&'a Volume> {
     volumes.iter().find(|v| Path::new(&v.path).canonicalize().ok().as_ref() == Some(&wanted))
 }
 
-fn detail(output: &Output, fallback: &str) -> Error {
-    let text = String::from_utf8_lossy(if output.stderr.is_empty() { &output.stdout } else { &output.stderr }).trim().to_owned();
-    Error::Message(if text.is_empty() { fallback.to_owned() } else { text })
-}
-
-/// Eject a removable volume that appears in the device list.
-pub fn eject(volume_id: &str, volumes: Option<&[Volume]>) -> Result<()> {
+fn listed_ejectable(volume_id: &str, volumes: Option<&[Volume]>) -> Option<Volume> {
     let current;
     let volumes = match volumes {
         Some(v) => v,
@@ -144,15 +121,15 @@ pub fn eject(volume_id: &str, volumes: Option<&[Volume]>) -> Result<()> {
             &current
         }
     };
-    let volume = Path::new(volume_id);
-    if !listed(volume, volumes).is_some_and(|v| v.ejectable) {
+    listed(Path::new(volume_id), volumes).filter(|v| v.ejectable).cloned()
+}
+
+/// Eject a removable volume that appears in the device list.
+pub fn eject(volume_id: &str, volumes: Option<&[Volume]>) -> Result<()> {
+    let Some(volume) = listed_ejectable(volume_id, volumes) else {
         return fail("That device can’t be ejected");
-    }
-    match run("diskutil", &["eject", &volume.canonicalize()?.to_string_lossy()], Duration::from_secs(30))? {
-        None => fail("Ejecting the device took too long"),
-        Some(out) if out.status.success() => Ok(()),
-        Some(out) => Err(detail(&out, "Couldn’t eject the device")),
-    }
+    };
+    platform::eject(Path::new(&volume.path))
 }
 
 /// A FAT32 volume label: capitals and digits, at most 11 characters.
@@ -166,31 +143,10 @@ pub fn fat_label(name: &str) -> String {
 
 /// Erase a removable volume and format it FAT32.
 pub fn format(volume_id: &str, volumes: Option<&[Volume]>) -> Result<()> {
-    let current;
-    let volumes = match volumes {
-        Some(v) => v,
-        None => {
-            current = list(None);
-            &current
-        }
-    };
-    let volume = Path::new(volume_id);
-    let Some(found) = listed(volume, volumes).filter(|v| v.ejectable) else {
+    let Some(volume) = listed_ejectable(volume_id, volumes) else {
         return fail("That device can’t be formatted");
     };
-    let info = disk_info(volume);
-    if !ejectable(&info) {
-        return fail("That device can’t be formatted");
-    }
-    let device = text(&info, "DeviceIdentifier");
-    if device.is_empty() {
-        return fail("Couldn’t identify the device");
-    }
-    match run("diskutil", &["eraseVolume", "FAT32", &fat_label(&found.name), &device], Duration::from_secs(120))? {
-        None => fail("Formatting the device took too long"),
-        Some(out) if out.status.success() => Ok(()),
-        Some(out) => Err(detail(&out, "Couldn’t format the device")),
-    }
+    platform::erase_as_fat32(Path::new(&volume.path), &fat_label(&volume.name))
 }
 
 #[cfg(test)]
@@ -232,5 +188,10 @@ mod tests {
         };
         assert!(eject(&volume.id, Some(std::slice::from_ref(&volume))).is_err());
         assert!(eject("/nowhere", Some(&[volume])).is_err());
+    }
+
+    #[test]
+    fn the_real_list_never_offers_a_volume_it_could_neither_eject_nor_read() {
+        assert!(list(None).iter().all(|volume| volume.ejectable || volume.has_library));
     }
 }

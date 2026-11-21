@@ -7,7 +7,6 @@ publish.workspace = true
 
 [dependencies]
 fs2 = "0.4"
-plist = "1"
 rb-storage = { path = "../rb-storage" }
 rbl-onelibrary = { path = "../rbl-onelibrary" }
 rbl-pdb = { path = "../rbl-pdb" }
@@ -15,6 +14,13 @@ rusqlite.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
+
+[target.'cfg(windows)'.dependencies]
+sysinfo = { version = "0.32", default-features = false, features = ["disk"] }
+windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_WindowsProgramming"] }
 
 [dev-dependencies]
 rbl-export = { path = "../rbl-export" }
