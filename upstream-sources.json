@@ -53,8 +53,8 @@
     },
     "crates/rbl-pdb/src/lib.rs": {
       "upstreamSha256": "ea2a970d60ac966600cea7e7176d68f2a1b4d3fb6a3d65e43eada24e0685959f",
-      "localSha256": "ffdbd0226de17596a442be6ada2a30077b25151ad8fc66dffcab27b1e533c2a7",
-      "reason": "Add opt-in strict table-directory, live page-chain and row-offset validation plus a property read that distinguishes absent settings from malformed or unsupported live rows; preserve existing tolerant parser APIs."
+      "localSha256": "3d2b8f32b4303cb388ca2f686f767a999d6cd214c9b6a95b45a52656bb0aac86",
+      "reason": "Add opt-in strict table-directory, live page-chain and row-offset validation plus a property read that distinguishes absent settings from malformed or unsupported live rows; preserve existing tolerant parser APIs. Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
     },
     "crates/rbl-db/src/dropbox.rs": {
       "upstreamSha256": "71680d0bb29b902c38f1960aac00a0c8494a09a73c2b17f594c12316976a2bfc",
@@ -103,8 +103,8 @@
     },
     "crates/rbl-export/src/lib.rs": {
       "upstreamSha256": "a453ec1bd0ef3f4bec23a5ef6fba889ef6583156e41d830001ae2693f905f18f",
-      "localSha256": "70c591d44ba536374f3758dc7866636734db4205dc86d9bd096bd3bf495ced9b",
-      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too. Verification includes preserved tracks. A caller's AudioConverter converts tracks it wants, moves their cues and analysis by its offset, describes its output in both databases and is reused from the manifest; plan summaries count copies, conversions and removals. Reports publishing progress; names the export's self-contained steps; writes new files in place and journals only replacements; never renames another writer's track; takes over and cleans up another writer's rows for the same library tracks."
+      "localSha256": "5e6d162f7e0c0ddc392d98599668df8866e03049eb3489e580320d003470e130",
+      "reason": "Preserve Export Studio namespaces, remove automatic settings discovery, add typed review checks, decision receipts, schema v3 and explicit recovery. Windows error codes for removed media, and a cache folder under a file bypasses the cache there too. Verification includes preserved tracks. A caller's AudioConverter converts tracks it wants, moves their cues and analysis by its offset, describes its output in both databases and is reused from the manifest; plan summaries count copies, conversions and removals. Reports publishing progress; names the export's self-contained steps; writes new files in place and journals only replacements; never renames another writer's track; takes over and cleans up another writer's rows for the same library tracks. Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
     },
     "crates/rbl-export/src/verification.rs": {
       "upstreamSha256": "1c89b40ee854ff0cfd11d1e5149eaa9bf1fb9504589e891b7859248b81b6a536",
@@ -190,6 +190,31 @@
       "upstreamSha256": "c4bf6c8ea014641b52ee7ef7496f7aa69ec522549a15c193ade4edd5f581f398",
       "localSha256": "37c8cb8cdebc551425f5d0acdbfd210b61f2c324c36d43f4804f9d6acd288954",
       "reason": "Covers files written in place: first syncs, journaled replacements, cancellation, and cleanup after an interrupted run."
+    },
+    "crates/rbl-pdb/src/reference.rs": {
+      "upstreamSha256": "37e67796769a9e2917fe2fb70011341dfaeb75639043ba1017aceb1a9e7ef1db",
+      "localSha256": "73f0bb1e71916951e532eebf3e3c95ba83ef7b525eb54967ec383d0b026d3a61",
+      "reason": "Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
+    },
+    "crates/rbl-pdb/src/rows.rs": {
+      "upstreamSha256": "0689a2b174a7cbd92ca5313abff4dfd00cd189c6f4a7ba63dbf87bade111b515",
+      "localSha256": "9beb036581af39276bc6d187375ddff099e1d815fdaced5cbb44e6c6fab47431",
+      "reason": "Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
+    },
+    "crates/rbl-export/tests/export.rs": {
+      "upstreamSha256": "b9300204636b4c69ad913f5f6a6fdf95e5604e4abb3129dc5ed7fc403eb318f0",
+      "localSha256": "88f3e5b3cb68edb089360baefbe6befc51bd9ca3f2b9ade689e75e96dfb42dbf",
+      "reason": "Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
+    },
+    "crates/rbl-export/tests/sync.rs": {
+      "upstreamSha256": "e2d9302718bf4cd28f51fa3e1f43422b0e3d09228d95a30d16ac325746eb9f71",
+      "localSha256": "decb3c63eeba5067f9c10412b6429d94ffd6e2aa2641fe84df4bccdd272a0f34",
+      "reason": "Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
+    },
+    "crates/rbl-devices/src/settings.rs": {
+      "upstreamSha256": "8fe18e3f794c52887fbf88eb9f2763eb998948894725e0c8495961dbe660a255",
+      "localSha256": "5f8e8196e992ea5fb5b60960a10b06e855fa26b3724db986817cd3c678783cd4",
+      "reason": "Ports rbxport 2bb828d6, 96a59b94 and e9b68ab7 (#619): export.pdb types 17 and 18 are the browse categories and sorts, written from the stick's settings."
     }
   },
   "localExtractions": {

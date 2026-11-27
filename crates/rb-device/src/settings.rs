@@ -2,7 +2,7 @@
 //!
 //! Display choices live in `DEVSETTING.DAT`; browse categories, sort options,
 //! the sub-column, device name and color labels live in `exportLibrary.db`.
-//! Name, labels and the Device Library background are also stored in `export.pdb`.
+//! Name, labels, the browse menus and the Device Library background are also stored in `export.pdb`.
 //! Reads never recover or modify a volume. Writes require prior export recovery,
 //! serialize with exports via the storage lease, and publish changed files together.
 
@@ -434,6 +434,14 @@ fn updated_pdb(
         next = rbl_pdb::build::replace_single_page_table(&next, 6, &rows).ok_or_else(|| {
             SettingsError::Invalid("Cannot update export.pdb color labels".into())
         })?;
+        // A player that reads only export.pdb takes its Category, Sort and Column settings from here. A stick
+        // written without these tables keeps them as they are, as rbl-devices does.
+        let (categories, sorts) = rbl_export::menu_rows(library);
+        for (page_type, rows) in [(17, categories), (18, sorts)] {
+            if let Some(replaced) = rbl_pdb::build::replace_single_page_table(&next, page_type, &rows) {
+                next = replaced;
+            }
+        }
     }
     let pdb =
         rbl_pdb::Pdb::parse_strict(&next).map_err(|error| SettingsError::Invalid(error.to_string()))?;
@@ -725,6 +733,34 @@ mod tests {
             std::fs::read(root.join("rekordbox/export.pdb")).unwrap(),
             pdb
         );
+    }
+
+    #[test]
+    fn a_menu_change_is_written_into_export_pdb_too() {
+        let volume = tempfile::tempdir().unwrap();
+        rbl_export::create_library(volume.path(), None, &[], None).unwrap();
+        let current = read(volume.path()).unwrap();
+
+        // BPM shown as a category and chosen as the column beside the title.
+        let mut next = current.clone();
+        let library = next.library.as_mut().unwrap();
+        let bpm = library.categories.iter_mut().find(|c| c.menu_item == 5).unwrap();
+        bpm.visible = true;
+        bpm.seq = 11;
+        library.sub_column = Some(5);
+        write_changes(volume.path(), &current, &next).unwrap();
+
+        let bytes = std::fs::read(export_root(volume.path()).join("rekordbox/export.pdb")).unwrap();
+        let pdb = rbl_pdb::Pdb::parse(&bytes).unwrap();
+        let rows = |kind| {
+            let table = pdb.table(kind).unwrap();
+            pdb.rows(table).iter().map(|row| bytes[row.offset..row.offset + 8].to_vec()).collect::<Vec<_>>()
+        };
+        let categories = rows(rbl_pdb::PageType::Categories);
+        let sorts = rows(rbl_pdb::PageType::Sorts);
+        assert!(categories.contains(&vec![0x05, 0x00, 0x06, 0x00, 0x05, 0x00, 0x0b, 0x00]), "BPM shown eleventh");
+        assert!(sorts.contains(&vec![0x05, 0x00, 0x04, 0x00, 0x02, 0x05, 0x00, 0x00]), "BPM the column beside the title");
+        assert!(sorts.contains(&vec![0x15, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00]), "COMMENTS no longer the column");
     }
 
     #[test]
