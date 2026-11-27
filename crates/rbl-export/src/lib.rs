@@ -1982,6 +1982,7 @@ fn export_cancellable_inner(
     let after = snapshot::Snapshot::read_at(publication.stage(), root_name)?;
     before.check_retained_history(&after)?;
     before.check_changes_reviewed(previous.as_ref(), &after, &device_additions, &accepted)?;
+    if cancelled() { return Err(ExportError::Cancelled); }
     progress(&ExportProgress { stage: "verifying", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
     let verified_reused: BTreeSet<String> = trusted.iter().filter(|p| !publication.stage().join(p).is_file()).cloned().collect();
     let preserved: BTreeSet<String> = tracks
