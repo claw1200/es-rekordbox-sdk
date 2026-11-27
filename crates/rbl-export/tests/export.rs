@@ -416,8 +416,8 @@ fn a_blank_stick_is_given_the_database_folders_rekordbox_creates_on_connect() {
             0 => rbl_pdb::PageType::Tracks, 1 => rbl_pdb::PageType::Genres, 2 => rbl_pdb::PageType::Artists,
             3 => rbl_pdb::PageType::Albums, 4 => rbl_pdb::PageType::Labels, 5 => rbl_pdb::PageType::Keys,
             6 => rbl_pdb::PageType::Colors, 7 => rbl_pdb::PageType::PlaylistTree, 8 => rbl_pdb::PageType::PlaylistEntries,
-            13 => rbl_pdb::PageType::Artwork, 16 => rbl_pdb::PageType::Columns, 17 => rbl_pdb::PageType::HistoryPlaylists,
-            18 => rbl_pdb::PageType::HistoryEntries, 19 => rbl_pdb::PageType::Property, other => rbl_pdb::PageType::Other(other),
+            13 => rbl_pdb::PageType::Artwork, 16 => rbl_pdb::PageType::Columns, 17 => rbl_pdb::PageType::Categories,
+            18 => rbl_pdb::PageType::Sorts, 19 => rbl_pdb::PageType::Property, other => rbl_pdb::PageType::Other(other),
         })).unwrap_or(u32::MAX),
     }).collect();
     assert_eq!(types, (0..20).collect::<Vec<u32>>());
@@ -425,8 +425,8 @@ fn a_blank_stick_is_given_the_database_folders_rekordbox_creates_on_connect() {
     assert_eq!(census.get("tracks"), Some(&0));
     assert_eq!(census.get("colors"), Some(&8));
     assert_eq!(census.get("columns"), Some(&27));
-    assert_eq!(census.get("history_playlists"), Some(&22));
-    assert_eq!(census.get("history_entries"), Some(&17));
+    assert_eq!(census.get("categories"), Some(&22));
+    assert_eq!(census.get("sorts"), Some(&17));
     assert_eq!(census.get("property"), Some(&1));
 
     // Its settings can be read and written like any stick's.
@@ -920,4 +920,104 @@ fn a_track_that_cannot_be_converted_is_reported_and_the_rest_still_sync() {
     assert!(verify(dest.path()).unwrap().is_ok());
     let wavs = std::fs::read_dir(dest.path().join("Contents")).unwrap().count();
     assert!(wavs > 0);
+}
+
+#[test]
+fn default_device_settings_give_rekordboxs_reference_menu_rows() {
+    use rbl_onelibrary::settings::StickSettings;
+    let owned = |rows: &[&[u8]]| rows.iter().map(|row| row.to_vec()).collect::<Vec<_>>();
+    let (categories, sorts) = rbl_export::menu_rows(&StickSettings::default());
+    assert_eq!(categories, owned(rbl_pdb::reference::CATEGORIES));
+    assert_eq!(sorts, owned(rbl_pdb::reference::SORTS));
+}
+
+/// #619: a stick rekordbox exported with the Sort tab at BPM, DATE ADDED, DJ
+/// PLAY COUNT, DEFAULT, ALPHABET, RATING, ARTIST, ALBUM, the Column tab at
+/// BPM and BPM shown as the eleventh category. These are the live rows of its
+/// `export.pdb` [OBS rekordbox 7, 2026-10-20]; rekordbox had edited the
+/// pages in place, so only the set of rows is compared, not their order.
+#[test]
+fn changed_device_settings_give_the_menu_rows_rekordbox_wrote_for_them() {
+    use rbl_onelibrary::settings::StickSettings;
+    let mut settings = StickSettings::default();
+    for sort in &mut settings.sorts {
+        sort.visible = false;
+        sort.seq = 0;
+    }
+    for (i, menu_item) in [5, 22, 23, 25, 26, 6, 2, 3].into_iter().enumerate() {
+        let sort = settings.sorts.iter_mut().find(|s| s.menu_item == menu_item).unwrap();
+        sort.visible = true;
+        sort.seq = i as i64 + 1;
+    }
+    settings.sub_column = Some(5);
+    let bpm = settings.categories.iter_mut().find(|c| c.menu_item == 5).unwrap();
+    bpm.visible = true;
+    bpm.seq = 11;
+
+    let hex = |rows: &[Vec<u8>]| {
+        let mut rows: Vec<String> = rows.iter().map(|row| row.iter().map(|b| format!("{b:02x}")).collect()).collect();
+        rows.sort();
+        rows
+    };
+    let sorted = |rows: &[&str]| {
+        let mut rows: Vec<String> = rows.iter().map(|&row| row.to_owned()).collect();
+        rows.sort();
+        rows
+    };
+    let (categories, sorts) = rbl_export::menu_rows(&settings);
+    assert_eq!(hex(&categories), sorted(&[
+        "0100010063010000", "0600070063010000", "0700080063010000", "0800090063010000",
+        "09000a0063010000", "0a000b0063010000", "0d000f0063010000", "0e00130004010000",
+        "0f00140006010000", "1000150063010000", "1200170063010000", "0200020002000100",
+        "0300030003000200", "0400040001000300", "0b000c0063000400", "1100050063000500",
+        "1300160063000600", "1400120063000700", "1b001a0063020800", "1800110063000900",
+        "16001b0063000a00", "0500060005000b00",
+    ]));
+    assert_eq!(hex(&sorts), sorted(&[
+        "0100060001000000", "1500070001000000", "0e00080001000000", "0800090001000000",
+        "09000a0001000000", "0a000b0001000000", "0f000d0001000000", "0d000f0001000000",
+        "0500040002010000", "1600110000020000", "1700100000030000", "1900000000040000",
+        "1a00010000050000", "0600050000060000", "0200020000070000", "0300030000080000",
+        "0b000c0001000000",
+    ]));
+}
+
+/// export.pdb and exportLibrary.db must describe the same menu, or an
+/// export.pdb-only player and a OneLibrary one show different orders:
+/// gapped positions, a newly shown slot at 0 and a hidden slot that kept its
+/// position get rekordbox's numbering, and a menu item exportLibrary.db does
+/// not know gets no row.
+#[test]
+fn menu_rows_number_and_filter_the_slots_as_export_library_db_does() {
+    use rbl_onelibrary::build::reference::MENU_ITEMS;
+    use rbl_onelibrary::settings::{renumbered, MenuSlot, StickSettings};
+    let mut settings = StickSettings::default();
+    for slots in [&mut settings.categories, &mut settings.sorts] {
+        for slot in slots.iter_mut().filter(|s| s.visible) {
+            slot.seq *= 3;
+        }
+        let hidden = slots.iter().position(|s| !s.visible).unwrap();
+        slots[hidden].visible = true;
+        slots[hidden].seq = 0;
+        let shown = slots.iter().position(|s| s.visible && s.seq > 3).unwrap();
+        slots[shown].visible = false;
+        slots.push(MenuSlot { id: 90, menu_item: 999, name: "NEW".into(), seq: 2, visible: true });
+    }
+    let expected = |slots: &[MenuSlot]| {
+        let mut rows: Vec<(u16, bool, u16)> = renumbered(slots)
+            .iter()
+            .filter(|s| MENU_ITEMS.iter().any(|(id, _, _)| *id == s.menu_item))
+            .map(|s| (s.menu_item as u16, s.visible, s.seq as u16))
+            .collect();
+        rows.sort_unstable();
+        rows
+    };
+    let u2 = |row: &[u8], at: usize| u16::from_le_bytes([row[at], row[at + 1]]);
+    let (categories, sorts) = rbl_export::menu_rows(&settings);
+    let mut got: Vec<(u16, bool, u16)> = categories.iter().map(|r| (u2(r, 0), r[5] & 1 == 0, u2(r, 6))).collect();
+    got.sort_unstable();
+    assert_eq!(got, expected(&settings.categories));
+    let mut got: Vec<(u16, bool, u16)> = sorts.iter().map(|r| (u2(r, 0), r[4] & 1 == 0, u16::from(r[5]))).collect();
+    got.sort_unstable();
+    assert_eq!(got, expected(&settings.sorts));
 }
