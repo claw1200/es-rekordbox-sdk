@@ -302,3 +302,78 @@ fn full_verification_compares_source_contents_as_well_as_usb_copies() {
     let manifest = Manifest::load(usb.path()).unwrap();
     assert_eq!(std::fs::read(usb.path().join(manifest.tracks[0].audio.trim_start_matches('/'))).unwrap(), vec![99; 8192]);
 }
+
+fn files_on(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(root: &Path, dir: &Path, files: &mut std::collections::BTreeSet<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() { walk(root, &path, files); } else { files.insert(path.strip_prefix(root).unwrap().to_string_lossy().into_owned()); }
+        }
+    }
+    let mut files = std::collections::BTreeSet::new();
+    walk(root, root, &mut files);
+    files
+}
+
+#[test]
+fn a_first_sync_writes_its_new_files_in_place_and_journals_only_the_rest() {
+    let source = tempfile::tempdir().unwrap(); let usb = common::stick();
+    let tracks = vec![track(source.path(), 1), track(source.path(), 2)];
+    let report = run(usb.path(), &tracks, &playlists(vec![0, 1]));
+    let audio_and_analysis = 4;
+    assert_eq!(report.metrics.files_written_in_place, audio_and_analysis, "{:?}", report.metrics);
+    let manifest = Manifest::load(usb.path()).unwrap();
+    for track in &manifest.tracks { assert!(usb.path().join(track.audio.trim_start_matches('/')).is_file()); }
+    assert!(!files_on(usb.path()).iter().any(|file| file.contains(".exportstudio-in-place") || file.contains(".exportstudio-partial-")));
+    assert!(rbl_export::verify(usb.path()).unwrap().is_ok());
+}
+
+#[test]
+fn a_resync_of_a_changed_track_replaces_it_through_the_journal() {
+    let source = tempfile::tempdir().unwrap(); let usb = common::stick();
+    let tracks = vec![track(source.path(), 1)];
+    run(usb.path(), &tracks, &playlists(vec![0]));
+    std::fs::write(&tracks[0].source_path, vec![9; 16384]).unwrap();
+    let changed = run(usb.path(), &tracks, &playlists(vec![0]));
+    assert!(changed.bytes_copied > 0);
+    assert_eq!(changed.metrics.files_written_in_place, 0);
+    assert!(rbl_export::verify(usb.path()).unwrap().is_ok());
+}
+
+#[test]
+fn a_sync_cancelled_after_writing_in_place_leaves_the_stick_as_it_was() {
+    let source = tempfile::tempdir().unwrap(); let usb = common::stick();
+    let mut tracks = vec![track(source.path(), 1)];
+    run(usb.path(), &tracks, &playlists(vec![0]));
+    let before = files_on(usb.path());
+    tracks.push(track(source.path(), 2));
+    tracks.push(track(source.path(), 3));
+    std::fs::write(&tracks[2].source_path, vec![3; 4 * 1024 * 1024]).unwrap();
+    let stop = std::cell::Cell::new(false);
+    let result = rbl_export::export_cancellable(usb.path(), &tracks, &playlists(vec![0, 1, 2]), &[],
+        &ExportOptions { sync: Some(&SyncSource { db_id: 123, ..Default::default() }), ..Default::default() },
+        &mut |p| { if p.stage == "copying" && p.title == "Track 3" && p.bytes_done > 0 { stop.set(true); } }, &|| stop.get());
+    assert!(matches!(result, Err(rbl_export::ExportError::Cancelled)));
+    assert_eq!(files_on(usb.path()), before);
+    assert!(rbl_export::verify(usb.path()).unwrap().is_ok());
+}
+
+#[test]
+fn files_an_interrupted_run_wrote_in_place_are_removed_by_the_next_sync() {
+    let source = tempfile::tempdir().unwrap(); let usb = common::stick();
+    let tracks = vec![track(source.path(), 1)];
+    run(usb.path(), &tracks, &playlists(vec![0]));
+    let kept = Manifest::load(usb.path()).unwrap().tracks[0].audio.trim_start_matches('/').to_owned();
+    let orphans = usb.path().join("Contents/Gone/Album");
+    std::fs::create_dir_all(&orphans).unwrap();
+    std::fs::write(orphans.join("Orphan.mp3"), b"half a copy").unwrap();
+    std::fs::write(orphans.join(".exportstudio-partial-abc123"), b"less").unwrap();
+    std::fs::write(usb.path().join(".exportstudio-in-place"), format!("Contents/Gone/Album/Orphan.mp3\n{kept}\n")).unwrap();
+
+    run(usb.path(), &tracks, &playlists(vec![0]));
+
+    assert!(!usb.path().join("Contents/Gone").exists());
+    assert!(usb.path().join(&kept).is_file());
+    assert!(!usb.path().join(".exportstudio-in-place").exists());
+    assert!(rbl_export::verify(usb.path()).unwrap().is_ok());
+}

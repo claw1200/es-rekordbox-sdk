@@ -23,6 +23,7 @@ pub mod plan;
 pub mod sync_record;
 pub mod snapshot;
 pub mod review;
+mod placement;
 mod reconcile;
 mod verification;
 
@@ -986,6 +987,7 @@ fn export_cancellable_inner(
     rbl_core::durable::create_dir_all(&db_dir)?;
 
     let publication = rbl_core::durable::Publication::new(destination, PUBLICATION)?;
+    placement::clean_up_interrupted_run(destination);
     if let Some(volume) = expected_volume { volume.check(destination)?; }
     let mut previous = Manifest::load(destination);
     let mut full_source_hashes = BTreeMap::new();
@@ -1142,6 +1144,7 @@ fn export_cancellable_inner(
     // before this export: the databases keep naming it, as they did.
     let mut absent_audio: BTreeSet<String> = BTreeSet::new();
     let mut written_audio_paths = BTreeSet::new();
+    let mut placement = placement::Placement::new(destination, publication.stage(), &before);
     let mut written_analysis_paths: BTreeSet<String> = tracks.iter()
         .filter_map(|t| t.device.as_ref().filter(|d| d.preserve).map(|d| path_key(&d.analysis_dir)))
         .collect();
@@ -1354,6 +1357,7 @@ fn export_cancellable_inner(
 
         let output_size;
         let mut copied_hash = None;
+        let mut copied_to = None;
         let mut conversion_info: Option<ConvertedAudio> = None;
         if absent {
             output_size = size;
@@ -1383,10 +1387,8 @@ fn export_cancellable_inner(
         } else {
             if carried.is_some() { report.tracks_updated += 1; }
             progress(&ExportProgress { stage: "copying", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", ..Default::default() });
-            let audio_dest = under(publication.stage(), &place.audio);
-            if let Some(parent) = audio_dest.parent() {
-                std::fs::create_dir_all(parent).map_err(context(format!("Could not create the folder for '{}'", track.title)))?;
-            }
+            let audio_dest = placement.target(&place.audio).map_err(context(format!("Could not create the folder for '{}'", track.title)))?;
+            copied_to = Some(audio_dest.clone());
             let written = write_audio(track, &audio_dest, conversion, cache, &mut report, (index, tracks.len()), progress, cancelled)?;
             match written {
                 Ok(written) => {
@@ -1538,11 +1540,10 @@ fn export_cancellable_inner(
             }
         }
         if !track.analysis.is_empty() && !analysis_current {
-            let anlz_dir = under(publication.stage(), &place.anlz_dir);
             let failed = context(format!("Could not write the analysis of '{}'", track.title));
-            std::fs::create_dir_all(&anlz_dir).map_err(&failed)?;
             for (extension, bytes) in analysis {
-                std::fs::write(anlz_dir.join(format!("ANLZ0000.{extension}")), bytes).map_err(&failed)?;
+                let target = placement.target(&format!("{}/ANLZ0000.{extension}", place.anlz_dir)).map_err(&failed)?;
+                std::fs::write(target, bytes).map_err(&failed)?;
                 report.analysis_files += 1;
             }
         }
@@ -1567,7 +1568,7 @@ fn export_cancellable_inner(
                 let reuse = previous.as_ref().and_then(|m| m.generation.as_ref())
                     .is_some_and(|g| g.artwork_recipes.get(&art_key) == Some(&stamp))
                     && artwork_names(id).iter().all(|(p, _)| trusted.contains(&p.trim_start_matches('/').replacen("PIONEER/", &format!("{root_name}/"), 1)));
-                if !reuse { report.artwork_files += write_artwork(publication.stage(), destination, root_name, id, image)?; }
+                if !reuse { report.artwork_files += write_artwork(&mut placement, publication.stage(), destination, root_name, id, image)?; }
                 artwork_recipes.insert(art_key, stamp);
                 id
             }
@@ -1587,7 +1588,7 @@ fn export_cancellable_inner(
         } else if unchanged {
             existing_audio_hash.map_or_else(|| file_hash_cancellable(&audio_dest, cancelled), Ok)?
         } else {
-            copied_hash.map_or_else(|| file_hash_cancellable(&under(publication.stage(), &place.audio), cancelled), Ok)?
+            copied_hash.map_or_else(|| file_hash_cancellable(&copied(copied_to.as_deref(), publication.stage(), &place.audio), cancelled), Ok)?
         };
         // Publication renames the staged copy into place, which keeps its
         // size and time, so the staged file's stamp is the published one's.
@@ -1600,7 +1601,7 @@ fn export_cancellable_inner(
         } else if unchanged {
             copy_now
         } else {
-            copy_stamp(&under(publication.stage(), &place.audio))?
+            copy_stamp(&copied(copied_to.as_deref(), publication.stage(), &place.audio))?
         };
         recorded.push(ManifestTrack {
             analysis_hashes: analysis_reused.map_or_else(|| analysis.iter().map(|(e, b)| (e.clone(), manifest::hash(b))).collect(), |c| c.analysis_hashes.clone()),
@@ -1913,7 +1914,8 @@ fn export_cancellable_inner(
         Ok(())
     }, |metrics, ms| metrics.final_guards_ms += ms)?;
     if cancelled() { return Err(ExportError::Cancelled); }
-    publish(destination, root_name, &publication, &files, &mut manifest, &report, progress)?;
+    publish(destination, root_name, &publication, &mut placement, &files, &mut manifest, &report, progress)?;
+    placement.published();
     report.verified = true;
     publication.check_root()?;
     remove_emptied_folders(destination, obsolete, &retained)?;
@@ -1926,10 +1928,12 @@ fn export_cancellable_inner(
 
 /// Puts the staged generation in place, checks the published databases and seals the manifest describing them.
 /// Anything that fails once files are in place restores the previous library.
+#[allow(clippy::too_many_arguments, reason = "the run's publication, its files and their record")]
 fn publish(
     destination: &Path,
     root_name: &str,
     publication: &rbl_core::durable::Publication,
+    placement: &mut placement::Placement,
     files: &[PathBuf],
     manifest: &mut Manifest,
     report: &ExportReport,
@@ -1938,6 +1942,7 @@ fn publish(
     let (reused, copied, converted) = (report.reused, report.tracks_added + report.tracks_updated, report.converted);
     let mut publishing = |done, total| progress(&ExportProgress { stage: "publishing", done, total, unit: "files", reused, copied, converted, ..Default::default() });
     publishing(0, files.len());
+    incremental::timed(|| placement.make_durable_for_commit(), |metrics, ms| metrics.in_place_flush_ms += ms)?;
     if let Err(error) = publication.commit_retained_with_progress(files, &mut publishing) {
         if rbl_core::durable::Publication::validation_pending(destination, PUBLICATION) {
             if let Err(rollback) = publication.rollback() {
@@ -1984,6 +1989,11 @@ fn remove_emptied_folders(destination: &Path, obsolete: Vec<(String, bool)>, ret
         }
     }
     Ok(())
+}
+
+/// Where a track's audio was copied: in place, or into the stage.
+fn copied(copied_to: Option<&Path>, stage: &Path, audio: &str) -> PathBuf {
+    copied_to.map_or_else(|| under(stage, audio), Path::to_path_buf)
 }
 
 /// The audio a track's copy or conversion wrote.
@@ -2483,19 +2493,15 @@ fn artwork_source(image: &Path, medium: bool) -> PathBuf {
 
 /// Copies an image to its four places, skipping any already there at the
 /// same size. Returns how many files were written.
-fn write_artwork(destination: &Path, existing: &Path, root_name: &str, id: u32, image: &Path) -> Result<usize> {
+fn write_artwork(placement: &mut placement::Placement, stage: &Path, existing: &Path, root_name: &str, id: u32, image: &Path) -> Result<usize> {
     let mut written = 0;
     for (name, medium) in artwork_names(id) {
         let source = artwork_source(image, medium);
         let name = name.replacen("/PIONEER/", &format!("/{root_name}/"), 1);
-        let target = under(destination, &name);
-        if files_equal(&source, &target)? || files_equal(&source, &under(existing, &name))? {
+        if files_equal(&source, &under(stage, &name))? || files_equal(&source, &under(existing, &name))? {
             continue;
         }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match copy_staged(&source, &target) {
+        match copy_staged(&source, &placement.target(&name)?) {
             Ok(_) => written += 1,
             Err(e) if is_device_gone(&e) => return Err(ExportError::DeviceGone),
             Err(e) => return Err(e.into()),
@@ -2703,7 +2709,7 @@ fn copy_data_observed(from: &Path, to: &Path, durable: bool, progress: &mut dyn 
     }
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let parent = to.parent().unwrap_or(Path::new("."));
-    let staging = tempfile::NamedTempFile::new_in(parent)?;
+    let staging = tempfile::Builder::new().prefix(placement::PARTIAL_PREFIX).tempfile_in(parent)?;
     let mut target = staging.reopen()?;
     let (send, receive) = std::sync::mpsc::sync_channel::<Vec<u8>>(COPY_QUEUE);
     let (ack, acknowledgements) = std::sync::mpsc::channel();

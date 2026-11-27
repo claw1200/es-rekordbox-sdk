@@ -23,6 +23,8 @@ pub struct Metrics {
     pub retiring_ms: u64,
     pub final_guards_ms: u64,
     pub published_check_ms: u64,
+    pub files_written_in_place: u64,
+    pub in_place_flush_ms: u64,
 }
 
 fn millis(duration: std::time::Duration) -> u64 {
@@ -69,6 +71,10 @@ pub(crate) fn timed<T>(work: impl FnOnce() -> T, record: impl FnOnce(&mut Metric
     METRICS.with(|m| record(&mut m.borrow_mut(), millis(started.elapsed())));
     result
 }
+pub(crate) fn record(update: impl FnOnce(&mut Metrics)) {
+    METRICS.with(|m| update(&mut m.borrow_mut()));
+}
+
 pub(crate) fn count(build: bool, convert: bool, probe: bool) {
     METRICS.with(|m| { let mut m = m.borrow_mut(); m.database_builds += u64::from(build); m.conversions += u64::from(convert); m.probes += u64::from(probe); });
 }
