@@ -1946,7 +1946,8 @@ mod tests {
         let cost = flush_cost();
         let publication_record = 1;
         assert_eq!(cost.file_flushes, images.len() as u64 + publication_record);
-        assert!(cost.directory_flushes > 0);
+        let flushes_directories = cfg!(unix);
+        assert_eq!(cost.directory_flushes > 0, flushes_directories);
     }
 
     #[test]
