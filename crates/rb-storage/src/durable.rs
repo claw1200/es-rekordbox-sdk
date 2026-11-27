@@ -372,13 +372,13 @@ pub fn root_fingerprint(root: &Path) -> std::io::Result<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
+        Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
     }
     #[cfg(windows)]
     {
         let handle = winapi_util::Handle::from_path_any(root)?;
         let info = winapi_util::file::information(&handle)?;
-        return Ok(format!("windows:{:?}:{:?}", Some(info.volume_serial_number()), Some(info.file_index())));
+        Ok(format!("windows:{:?}:{:?}", Some(info.volume_serial_number()), Some(info.file_index())))
     }
     #[cfg(not(any(unix, windows)))]
     {
