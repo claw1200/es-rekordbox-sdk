@@ -614,14 +614,16 @@ fn adopted_paths(destination: &Path, tracks: &[SourceTrack], previous: Option<&M
 
 fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Manifest>, in_place: &[Option<String>], previous_in_place: &BTreeSet<String>) -> Vec<Layout> {
     let recorded: BTreeMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
-    // Library files on the stick keep their names, and nothing copied may land
-    // on one: not this run's, nor one an earlier run pointed at and left.
+    // Library files on the stick and another writer's tracks keep their names,
+    // and nothing copied may land on one: not this run's, nor one an earlier
+    // run pointed at and left.
     let mut used: BTreeSet<String> = in_place.iter().flatten().map(|path| path_key(path))
         .chain(previous_in_place.iter().cloned())
+        .chain(tracks.iter().filter_map(another_writers).map(|device| path_key(&device.audio)))
         .collect();
     tracks.iter().zip(ids).zip(in_place).map(|((track, id), in_place)| {
         let mut place = layout(track, *id);
-        if let Some(device) = track.device.as_ref().filter(|d| d.preserve) {
+        if let Some(device) = another_writers(track) {
             place.audio.clone_from(&device.audio);
             place.file_name = Path::new(&place.audio).file_name().unwrap_or_default().to_string_lossy().into_owned();
             place.anlz_dir.clone_from(&device.analysis_dir);
@@ -630,8 +632,7 @@ fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Ma
             audio.rsplit('/').next().unwrap_or_default().clone_into(&mut place.file_name);
         }
         place.anlz_dir = place.anlz_dir.replacen("/PIONEER/", &format!("/{root}/"), 1);
-        // A file left in place is where the library keeps it: never renamed.
-        if in_place.is_some() { return place; }
+        if in_place.is_some() || another_writers(track).is_some() { return place; }
         // Keep a previous collision suffix when another colliding track goes away.
         if let Some(old) = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())) {
             if old.conversion.is_empty() && Path::new(&old.audio).parent() == Path::new(&place.audio).parent() && old.source == track.source_path.to_string_lossy() {
@@ -655,6 +656,11 @@ fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Ma
         }
         place
     }).collect()
+}
+
+/// The stick's record of a track this export carries but does not own.
+fn another_writers(track: &SourceTrack) -> Option<&DeviceTrack> {
+    track.device.as_ref().filter(|device| device.preserve)
 }
 
 /// Compare bytes, not merely size/mtime: removable media may have been edited.

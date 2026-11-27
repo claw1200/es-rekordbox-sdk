@@ -179,6 +179,20 @@ fn another_librarys_copies_are_not_taken_for_this_ones() {
     assert_eq!((estimate.tracks_new, estimate.tracks_kept), (2, 0));
 }
 
+#[test]
+fn another_writers_track_keeps_its_file_when_this_library_wants_the_same_name() {
+    let (src, dest) = (tempfile::tempdir().unwrap(), common::stick());
+    let (tracks, playlists) = exported_elsewhere(src.path(), dest.path(), 2, DB_ID + 1);
+    let theirs = audio_files(dest.path());
+
+    sync_to(dest.path(), &tracks, &playlists, DB_ID).unwrap();
+
+    let files = audio_files(dest.path());
+    assert!(theirs.iter().all(|file| files.contains(file)), "their files keep their names: {files:?}");
+    assert_eq!(files.len(), 2 * theirs.len(), "this library's copies go beside them");
+    assert!(rbl_export::verify(dest.path()).unwrap().is_ok());
+}
+
 /// Gives a track a different comment in `exportLibrary.db` than in
 /// `export.pdb`.
 fn disagree_on_comment(dest: &Path, device_id: u32) {
