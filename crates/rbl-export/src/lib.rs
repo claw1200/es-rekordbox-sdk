@@ -23,6 +23,7 @@ pub mod plan;
 pub mod sync_record;
 pub mod snapshot;
 pub mod review;
+mod placement;
 mod reconcile;
 mod verification;
 
@@ -224,9 +225,11 @@ pub struct ExportProgress {
     pub reused: usize,
     pub copied: usize,
     pub converted: usize,
-    /// `checking`, `copying`, `database`, `verifying`, or `publishing`.
+    /// `checking`, `planning`, `converting`, `preparing`, `copying`,
+    /// `database`, `verifying`, `publishing` or `cleanup`.
     pub stage: &'static str,
-    /// Tracks dealt with so far, copied, reused or skipped.
+    /// Tracks dealt with so far, copied, reused or skipped; while
+    /// `publishing`, files put in place.
     pub done: usize,
     pub total: usize,
     /// The track just dealt with.
@@ -589,12 +592,13 @@ fn in_place_paths(destination: &Path, tracks: &[SourceTrack], previous: &BTreeSe
 #[allow(clippy::too_many_arguments, reason = "cold adoption progress and cancellation")]
 fn adopted_paths(destination: &Path, tracks: &[SourceTrack], previous: Option<&Manifest>, in_place: &[Option<String>], db_id: u64, progress: &mut dyn FnMut(&ExportProgress), cancelled: &dyn Fn() -> bool) -> Result<Vec<Option<String>>> {
     if db_id == 0 { return Ok(vec![None; tracks.len()]); }
-    let recorded: BTreeSet<String> = previous.into_iter().flat_map(|m| &m.tracks).map(ManifestTrack::key).collect();
+    let recorded: BTreeMap<String, String> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), path_key(&t.audio))).collect();
     let mut claimed: BTreeSet<String> = in_place.iter().flatten().map(|path| path_key(path)).collect();
     tracks.iter().zip(in_place).enumerate().map(|(index, (track, in_place))| -> Result<Option<String>> {
         let candidate = (|| {
         let device = track.device.as_ref().filter(|d| !d.preserve && !d.audio.is_empty())?;
-        if in_place.is_some() || recorded.contains(&track_key(track.id, &track.source_path.to_string_lossy())) { return None; }
+        let recorded_here = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())).is_some_and(|audio| *audio == path_key(&device.audio));
+        if in_place.is_some() || recorded_here { return None; }
         let source = std::fs::metadata(&track.source_path).ok()?;
         let copy = std::fs::metadata(under(destination, &device.audio)).ok()?;
         (copy.is_file() && copy.len() == source.len()).then(|| device.audio.clone())
@@ -611,14 +615,16 @@ fn adopted_paths(destination: &Path, tracks: &[SourceTrack], previous: Option<&M
 
 fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Manifest>, in_place: &[Option<String>], previous_in_place: &BTreeSet<String>) -> Vec<Layout> {
     let recorded: BTreeMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
-    // Library files on the stick keep their names, and nothing copied may land
-    // on one: not this run's, nor one an earlier run pointed at and left.
+    // Library files on the stick and another writer's tracks keep their names,
+    // and nothing copied may land on one: not this run's, nor one an earlier
+    // run pointed at and left.
     let mut used: BTreeSet<String> = in_place.iter().flatten().map(|path| path_key(path))
         .chain(previous_in_place.iter().cloned())
+        .chain(tracks.iter().filter_map(another_writers).map(|device| path_key(&device.audio)))
         .collect();
     tracks.iter().zip(ids).zip(in_place).map(|((track, id), in_place)| {
         let mut place = layout(track, *id);
-        if let Some(device) = track.device.as_ref().filter(|d| d.preserve) {
+        if let Some(device) = another_writers(track) {
             place.audio.clone_from(&device.audio);
             place.file_name = Path::new(&place.audio).file_name().unwrap_or_default().to_string_lossy().into_owned();
             place.anlz_dir.clone_from(&device.analysis_dir);
@@ -627,8 +633,7 @@ fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Ma
             audio.rsplit('/').next().unwrap_or_default().clone_into(&mut place.file_name);
         }
         place.anlz_dir = place.anlz_dir.replacen("/PIONEER/", &format!("/{root}/"), 1);
-        // A file left in place is where the library keeps it: never renamed.
-        if in_place.is_some() { return place; }
+        if in_place.is_some() || another_writers(track).is_some() { return place; }
         // Keep a previous collision suffix when another colliding track goes away.
         if let Some(old) = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())) {
             if old.conversion.is_empty() && Path::new(&old.audio).parent() == Path::new(&place.audio).parent() && old.source == track.source_path.to_string_lossy() {
@@ -652,6 +657,32 @@ fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Ma
         }
         place
     }).collect()
+}
+
+/// What another writer's copy of a selected track leaves behind once the export no longer uses it: its analysis,
+/// and its audio when that is the library's own file, so nothing the library doesn't hold is lost.
+struct UnusedCopy {
+    audio: Option<PathBuf>,
+    analysis: Vec<PathBuf>,
+}
+
+impl UnusedCopy {
+    fn of(destination: &Path, copy: &reconcile::ReplacedCopy, track: &SourceTrack, written_audio: &BTreeSet<String>, written_analysis: &BTreeSet<String>) -> Result<Self> {
+        let audio = copy.audio.trim_start_matches('/');
+        let audio_unused = !written_audio.contains(&path_key(&copy.audio)) && files_equal(&track.source_path, &under(destination, audio))?;
+        let analysis_unused = !copy.analysis_dir.is_empty() && !written_analysis.contains(&path_key(&copy.analysis_dir));
+        let analysis = if analysis_unused {
+            ["DAT", "EXT", "2EX"]
+                .map(|extension| format!("{}/ANLZ0000.{extension}", copy.analysis_dir.trim_start_matches('/')))
+                .into_iter().filter(|file| under(destination, file).is_file()).map(PathBuf::from).collect()
+        } else { Vec::new() };
+        Ok(Self { audio: audio_unused.then(|| PathBuf::from(audio)), analysis })
+    }
+}
+
+/// The stick's record of a track this export carries but does not own.
+fn another_writers(track: &SourceTrack) -> Option<&DeviceTrack> {
+    track.device.as_ref().filter(|device| device.preserve)
 }
 
 /// Compare bytes, not merely size/mtime: removable media may have been edited.
@@ -984,6 +1015,7 @@ fn export_cancellable_inner(
     rbl_core::durable::create_dir_all(&db_dir)?;
 
     let publication = rbl_core::durable::Publication::new(destination, PUBLICATION)?;
+    placement::clean_up_interrupted_run(destination);
     if let Some(volume) = expected_volume { volume.check(destination)?; }
     let mut previous = Manifest::load(destination);
     let mut full_source_hashes = BTreeMap::new();
@@ -1066,77 +1098,11 @@ fn export_cancellable_inner(
     if !plan.unknown_size && fs2::available_space(destination)? < plan.peak_bytes {
         return Err(ExportError::Conflict(format!("Not enough temporary space to sync safely: approximately {} bytes required while the previous library is retained", plan.peak_bytes)));
     }
-    let (mut tracks, playlists, device_additions) = (plan.tracks, plan.playlists, plan.device_additions);
-    let mut source_contents_unchanged = BTreeSet::new();
-    let mut inspected_source_hashes = BTreeMap::new();
-    let recorded_sources: BTreeMap<_, _> = previous.as_ref().into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
-    for (index, track) in tracks.iter().enumerate() {
-        if cancelled() { return Err(ExportError::Cancelled); }
-        let key = track_key(track.id, &track.source_path.to_string_lossy());
-        let Some(old) = recorded_sources.get(&key) else { continue; };
-        let revision_changed = previous.as_ref().and_then(|m| m.generation.as_ref()).is_some_and(|g| {
-            g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_some_and(|old| incremental::revision(&track.source_path).is_ok_and(|now| now != *old))
-        });
-        if !revision_changed || track.source_unavailable || track.device.as_ref().is_some_and(|d| d.preserve) { continue; }
-        progress(&ExportProgress { stage: "planning", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", ..Default::default() });
-        let hash = cache.map_or_else(|| file_hash_cancellable(&track.source_path, cancelled), |cache| cache.source_hash(&track.source_path, cancelled).map_err(std::io::Error::other));
-        if let Ok(hash) = hash {
-            let expected = if old.conversion.is_empty() { old.audio_hash } else { old.conversion_source_hash };
-            if expected != 0 && hash == expected { source_contents_unchanged.insert(key.clone()); }
-            inspected_source_hashes.insert(key, hash);
-        }
-    }
+    let (mut tracks, playlists, device_additions, replaced) = (plan.tracks, plan.playlists, plan.device_additions, plan.replaced);
+    let SourceHashes { unchanged: source_contents_unchanged, read: inspected_source_hashes } =
+        reread_changed_sources(&tracks, previous.as_ref(), cache, progress, cancelled)?;
     if let Some(cache) = cache {
-        let recorded: BTreeMap<_, _> = previous.as_ref().into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
-        let count = tracks.len();
-        for (index, track) in tracks.iter_mut().enumerate() {
-            if cancelled() { return Err(ExportError::Cancelled); }
-            if !track.source_path.is_file() || track.device.as_ref().is_some_and(|d| d.preserve) || on_stick(destination, &track.source_path).is_some() { continue; }
-            let old = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())).copied();
-            let same_source = old.is_some_and(|old| std::fs::metadata(&track.source_path).is_ok_and(|m| source_stamp(&m) == (old.size, old.modified)))
-                && previous.as_ref().and_then(|m| m.generation.as_ref()).is_none_or(|g| g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_none_or(|r| incremental::revision(&track.source_path).is_ok_and(|now| now == *r)));
-            let prepared = (|| -> Result<Option<PathBuf>> {
-                // The caller's converter writes straight to the stick; nothing to prepare.
-                if let Some(converter) = converter {
-                    if converter.wants(&track.source_path)? { return Ok(None); }
-                }
-                let conversion = if let Some(target) = compatibility {
-                    cache.needs_conversion(&track.source_path)?.then_some(target.audio())
-                } else { None };
-                if old.is_some() && !same_source { let _ = cache.properties(&track.source_path)?; }
-                let same_profile = old.is_some_and(|old| old.conversion == conversion.map_or("", rbl_audio::compatibility::Format::profile));
-                if (same_source || source_contents_unchanged.contains(&track_key(track.id, &track.source_path.to_string_lossy()))) && same_profile { return Ok(None); }
-                if let Some(target) = conversion {
-                    let (path, _, _) = cache.converted(&track.source_path, target, &mut |done, total| {
-                        progress(&ExportProgress { stage: "converting", done: usize::try_from(done).unwrap_or(usize::MAX), total: total.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::from(track.duration_sec) * 1000), unit: "milliseconds", title: track.title.clone(), tracks_done: index, tracks_total: count, ..Default::default() });
-                    }, cancelled)?;
-                    Ok(Some(path))
-                } else if track.device.is_some() && old.is_none() {
-                    // Cold adoption is checked against the existing copy below.
-                    Ok(None)
-                } else { cache.original(&track.source_path, &mut |done, total| {
-                    progress(&ExportProgress { stage: "preparing", done: 0, total: 0, title: track.title.clone(), unit: "bytes", bytes_done: done, bytes_total: total, tracks_done: index, tracks_total: count, ..Default::default() });
-                }, cancelled).map(Some) }
-            })();
-            match prepared {
-                Ok(path) => track.prepared_audio = path,
-                Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
-                // Windows reports a cache folder under a file as AlreadyExists.
-                Err(ExportError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::NotADirectory | std::io::ErrorKind::AlreadyExists) && std::fs::File::open(&track.source_path).is_ok() => {
-                    track.cache_bypass = true;
-                }
-                Err(error) => {
-                    if let Some(fallback) = track.fallback.take().filter(|t| t.source_path.is_file()) {
-                        let id = track.id;
-                        *track = *fallback;
-                        track.id = id;
-                        track.source_unavailable = true;
-                        track.retained_reason = Some(error.to_string());
-                        if let Some(device) = &mut track.device { device.preserve = true; device.master_db_id = db_id; device.master_content_id = id; device.exported = old.is_some_and(|c| c.preserved != Some(true)); }
-                    } else { track.preparation_error = Some(error.to_string()); }
-                }
-            }
-        }
+        prepare_sources(destination, &mut tracks, previous.as_ref(), cache, options, &source_contents_unchanged, db_id, progress, cancelled)?;
     }
     let tracks = tracks.as_slice();
     let mut merged_tags = my_tags.to_vec();
@@ -1206,6 +1172,7 @@ fn export_cancellable_inner(
     // before this export: the databases keep naming it, as they did.
     let mut absent_audio: BTreeSet<String> = BTreeSet::new();
     let mut written_audio_paths = BTreeSet::new();
+    let mut placement = placement::Placement::new(destination, publication.stage(), &before);
     let mut written_analysis_paths: BTreeSet<String> = tracks.iter()
         .filter_map(|t| t.device.as_ref().filter(|d| d.preserve).map(|d| path_key(&d.analysis_dir)))
         .collect();
@@ -1417,7 +1384,8 @@ fn export_cancellable_inner(
         } else { false };
 
         let output_size;
-        let copied_hash = std::cell::Cell::new(None);
+        let mut copied_hash = None;
+        let mut copied_to = None;
         let mut conversion_info: Option<ConvertedAudio> = None;
         if absent {
             output_size = size;
@@ -1447,46 +1415,16 @@ fn export_cancellable_inner(
         } else {
             if carried.is_some() { report.tracks_updated += 1; }
             progress(&ExportProgress { stage: "copying", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", ..Default::default() });
-            let audio_dest = under(publication.stage(), &place.audio);
-            if let Some(parent) = audio_dest.parent() {
-                std::fs::create_dir_all(parent).map_err(context(format!("Could not create the folder for '{}'", track.title)))?;
-            }
-            let written = match conversion {
-                Some(Target::External(converter)) => {
-                    report.converted += 1;
-                    progress(&ExportProgress { stage: "converting", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: tracks.len(), ..Default::default() });
-                    converter.convert(&track.source_path, &audio_dest)
-                        .and_then(|made| { conversion_info = Some(made); std::fs::metadata(&audio_dest).map(|m| m.len()) })
-                }
-                Some(Target::Builtin(target)) => {
-                    report.converted += 1;
-                    if let Some(cache) = cache.filter(|_| !track.cache_bypass) {
-                        match cache.converted(&track.source_path, target, &mut |done, total| {
-                            progress(&ExportProgress { stage: "converting", done: usize::try_from(done).unwrap_or(usize::MAX), total: total.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::from(track.duration_sec) * 1000), title: track.title.clone(), unit: "milliseconds", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: tracks.len(), ..Default::default() });
-                        }, cancelled) {
-                            Ok((path, _, _)) => {
-                                copy_staged_observed(&path, &audio_dest, &mut |done, total| {
-                                    progress(&ExportProgress { stage: "copying", done: 0, total: 0, title: track.title.clone(), unit: "bytes", bytes_done: done, bytes_total: total, reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, tracks_done: index, tracks_total: tracks.len() });
-                                    !cancelled()
-                                }).map(|(bytes, hash)| { copied_hash.set(Some(hash)); bytes })
-                            }
-                            Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
-                            Err(e) => Err(std::io::Error::other(e.to_string())),
-                        }
-                    } else {
-                        rbl_audio::compatibility::convert_observed(&track.source_path, &audio_dest, target, &mut |done, total| {
-                            progress(&ExportProgress { stage: "converting", done: usize::try_from(done).unwrap_or(usize::MAX), total: total.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::from(track.duration_sec) * 1000), title: track.title.clone(), unit: "milliseconds", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: tracks.len(), ..Default::default() });
-                            !cancelled()
-                        }).map_err(|e| std::io::Error::other(format!("{}: {e}", track.title)))
-                    }
-                },
-                None => copy_staged_observed(track.prepared_audio.as_deref().unwrap_or(&track.source_path), &audio_dest, &mut |done, total| {
-                    progress(&ExportProgress { stage: "copying", done: 0, total: 0, title: track.title.clone(), unit: "bytes", bytes_done: done, bytes_total: total, reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, tracks_done: index, tracks_total: tracks.len() });
-                    !cancelled()
-                }).map(|(bytes, hash)| { copied_hash.set(Some(hash)); bytes }),
-            };
+            let audio_dest = placement.target(&place.audio).map_err(context(format!("Could not create the folder for '{}'", track.title)))?;
+            copied_to = Some(audio_dest.clone());
+            let written = write_audio(track, &audio_dest, conversion, cache, &mut report, (index, tracks.len()), progress, cancelled)?;
             match written {
-                Ok(bytes) => { output_size = bytes; report.bytes_copied += bytes; },
+                Ok(written) => {
+                    output_size = written.bytes;
+                    report.bytes_copied += written.bytes;
+                    copied_hash = written.hash;
+                    conversion_info = written.conversion;
+                }
                 Err(_) if cancelled() => return Err(ExportError::Cancelled),
                 Err(e) if is_device_gone(&e) => return Err(ExportError::DeviceGone),
                 Err(e) if e.kind() == std::io::ErrorKind::StorageFull || carried.is_some() => return Err(e.into()),
@@ -1532,7 +1470,7 @@ fn export_cancellable_inner(
         let source_changed = !source_receipt_matches && !source_contents_unchanged.contains(&key) && !track.source_unavailable && !preserved;
         let content_changed = source_changed && carried.is_some_and(|c| {
             let old_hash = if c.conversion.is_empty() { c.audio_hash } else { c.conversion_source_hash };
-            let now = if conversion.is_some() { Some(source_hash) } else { copied_hash.get() };
+            let now = if conversion.is_some() { Some(source_hash) } else { copied_hash };
             now.is_none_or(|now| old_hash == 0 || old_hash != now)
         });
         if content_changed {
@@ -1599,47 +1537,10 @@ fn export_cancellable_inner(
         }
         let track = &hydrated;
         let exported_analysis = if analysis_reused.is_some() || track.device.as_ref().is_some_and(|d| d.preserve) { None } else {
+            let offset = conversion_info.filter(|made| made.offset_ms != 0 && !analysis_from_stick).zip(converter);
             Some(track.analysis.iter().map(|(extension, bytes)| {
-                let shifted;
-                let bytes = match conversion_info.filter(|made| made.offset_ms != 0 && !analysis_from_stick).zip(converter) {
-                    Some((made, converter)) => { shifted = converter.shift_analysis(extension, bytes, made.offset_ms)?; &shifted }
-                    None => bytes,
-                };
-                let mut parsed = rbl_anlz::parse(bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
-                let path_bytes = rbl_anlz::AnlzBuilder::new().path(&place.audio).finish();
-                let path = rbl_anlz::parse(&path_bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
-                // A DAT/EXT/2EX has one PPTH. Drop it by tag rather than by
-                // decoded value, so a malformed legacy path cannot survive
-                // alongside the replacement path.
-                parsed.sections.retain(|s| s.tag != rbl_core::FourCc::new(b"PPTH"));
-                parsed.sections.splice(0..0, path.sections);
-                // Older RBXport analysis files predate the PVBR section. A
-                // freshly initialized Pioneer DAT always writes it between
-                // PPTH and PQTZ, even when there are no VBR frames. Repair
-                // those stale files while exporting rather than asking the
-                // user to re-analyse every affected track.
-                if extension.eq_ignore_ascii_case("DAT") && (conversion.is_some() || parsed.section(b"PVBR").is_none()) {
-                    // Seek offsets from the source must never point into a
-                    // different encoding. Compatibility outputs are PCM or
-                    // CBR MP3, so they need no source VBR seek table.
-                    parsed.sections.retain(|s| s.tag != rbl_core::FourCc::new(b"PVBR"));
-                    parsed.sections.insert(1, rbl_anlz::write::vbr_table_zero_section());
-                }
-                parsed.sections = parsed.sections.iter().map(rbl_anlz::Section::with_export_phrase_mask).collect();
-                // Analysis written before issue #278 put whiteness bits in
-                // `PWV2` and zero-height preview columns, neither of which
-                // rekordbox writes; a Nexus player (XDJ-1000MK2) then rejects
-                // the track's whole preview, and with it the detail waveform
-                // and hot-cue markers on load. rekordbox-written `PWAV` and
-                // `PWV2` pass through unchanged.
-                parsed.sections = parsed.sections.iter().map(rbl_anlz::encode::with_device_preview).collect();
-                if let Some(cues) = &track.cues {
-                    if extension == "DAT" || extension == "EXT" {
-                        parsed.sections.retain(|s| !s.is_cue_list());
-                        parsed.sections.extend(rbl_anlz::cues::sections(cues, extension == "EXT"));
-                    }
-                }
-                Ok::<_, std::io::Error>((extension.clone(), parsed.to_bytes()))
+                let bytes = device_analysis_file(extension, bytes, &place.audio, offset, conversion.is_some(), track.cues.as_deref())?;
+                Ok::<_, std::io::Error>((extension.clone(), bytes))
             }).collect::<std::io::Result<Vec<_>>>()?)
         };
         let analysis = exported_analysis.as_deref().unwrap_or(&track.analysis);
@@ -1667,11 +1568,10 @@ fn export_cancellable_inner(
             }
         }
         if !track.analysis.is_empty() && !analysis_current {
-            let anlz_dir = under(publication.stage(), &place.anlz_dir);
             let failed = context(format!("Could not write the analysis of '{}'", track.title));
-            std::fs::create_dir_all(&anlz_dir).map_err(&failed)?;
             for (extension, bytes) in analysis {
-                std::fs::write(anlz_dir.join(format!("ANLZ0000.{extension}")), bytes).map_err(&failed)?;
+                let target = placement.target(&format!("{}/ANLZ0000.{extension}", place.anlz_dir)).map_err(&failed)?;
+                std::fs::write(target, bytes).map_err(&failed)?;
                 report.analysis_files += 1;
             }
         }
@@ -1696,7 +1596,7 @@ fn export_cancellable_inner(
                 let reuse = previous.as_ref().and_then(|m| m.generation.as_ref())
                     .is_some_and(|g| g.artwork_recipes.get(&art_key) == Some(&stamp))
                     && artwork_names(id).iter().all(|(p, _)| trusted.contains(&p.trim_start_matches('/').replacen("PIONEER/", &format!("{root_name}/"), 1)));
-                if !reuse { report.artwork_files += write_artwork(publication.stage(), destination, root_name, id, image)?; }
+                if !reuse { report.artwork_files += write_artwork(&mut placement, publication.stage(), destination, root_name, id, image)?; }
                 artwork_recipes.insert(art_key, stamp);
                 id
             }
@@ -1716,7 +1616,7 @@ fn export_cancellable_inner(
         } else if unchanged {
             existing_audio_hash.map_or_else(|| file_hash_cancellable(&audio_dest, cancelled), Ok)?
         } else {
-            copied_hash.get().map_or_else(|| file_hash_cancellable(&under(publication.stage(), &place.audio), cancelled), Ok)?
+            copied_hash.map_or_else(|| file_hash_cancellable(&copied(copied_to.as_deref(), publication.stage(), &place.audio), cancelled), Ok)?
         };
         // Publication renames the staged copy into place, which keeps its
         // size and time, so the staged file's stamp is the published one's.
@@ -1729,7 +1629,7 @@ fn export_cancellable_inner(
         } else if unchanged {
             copy_now
         } else {
-            copy_stamp(&under(publication.stage(), &place.audio))?
+            copy_stamp(&copied(copied_to.as_deref(), publication.stage(), &place.audio))?
         };
         recorded.push(ManifestTrack {
             analysis_hashes: analysis_reused.map_or_else(|| analysis.iter().map(|(e, b)| (e.clone(), manifest::hash(b))).collect(), |c| c.analysis_hashes.clone()),
@@ -1846,6 +1746,17 @@ fn export_cancellable_inner(
         obsolete.push((entry.anlz_dir.clone(), true));
         report.removed += 1;
     }
+    for copy in &replaced {
+        let unused = UnusedCopy::of(destination, copy, &tracks[copy.track], &written_audio_paths, &written_analysis_paths)?;
+        if let Some(audio) = unused.audio {
+            obsolete.push((copy.audio.clone(), false));
+            deletions.push(audio);
+        }
+        if !unused.analysis.is_empty() {
+            obsolete.push((copy.analysis_dir.clone(), true));
+            deletions.extend(unused.analysis);
+        }
+    }
 
     // Playlists reference export ids, so they are built after the tracks.
     let mut playlist_rows = Vec::with_capacity(playlists.len());
@@ -1887,41 +1798,15 @@ fn export_cancellable_inner(
         artwork.entries().map(|(id, _)| (id, artwork_path(id, "a", false).replacen("/PIONEER/", &format!("/{root_name}/"), 1))).collect();
     let artwork_rows: Vec<Vec<u8>> = artwork_paths.iter().map(|(id, path)| artwork_row(*id, path)).collect();
 
-    // A DeviceSQL row has to fit on one page. Without this check the page
-    // builder cuts the row off and the stick's export.pdb is corrupt, which
-    // verification reports only as the two databases disagreeing.
-    let limit = rbl_pdb::build::max_row_len(PAGE_SIZE);
-    if let Some((row, track)) = track_rows.iter().zip(&one_library_tracks).find(|(row, _)| row.len() > limit) {
-        return Err(ExportError::Conflict(format!(
-            "'{}' has more text in its title, comment and other tags than export.pdb can hold for one track ({} bytes; at most {limit}). Shorten them and sync again; the USB was left as it was.",
-            track.title,
-            row.len()
-        )));
-    }
     let genre_rows: Vec<_> = genres.entries().map(|(id, n)| simple_named_row(id, n)).collect();
     let artist_rows: Vec<_> = artists.entries().map(|(id, n)| artist_row(id, n)).collect();
     let album_rows: Vec<_> = albums.entries().map(|(id, n)| album_row(id, 0, n)).collect();
     let label_rows: Vec<_> = labels.entries().map(|(id, n)| simple_named_row(id, n)).collect();
     let key_rows: Vec<_> = keys.entries().map(|(id, n)| key_row(id, n)).collect();
-    for (kind, names, rows) in [
+    refuse_rows_too_long_for_a_page(&track_rows, &one_library_tracks, [
         ("genre", &genres, &genre_rows), ("artist", &artists, &artist_rows), ("album", &albums, &album_rows),
         ("label", &labels, &label_rows), ("key", &keys, &key_rows),
-    ] {
-        if let Some(((_, name), row)) = names.entries().zip(rows).find(|(_, row)| row.len() > limit) {
-            let start: String = name.chars().take(40).collect();
-            return Err(ExportError::Conflict(format!(
-                "The {kind} '{start}…' is longer than export.pdb can hold ({} bytes; at most {limit}). Shorten it and sync again; the USB was left as it was.",
-                row.len()
-            )));
-        }
-    }
-    if let Some((row, playlist)) = playlist_rows.iter().zip(playlists).find(|(row, _)| row.len() > limit) {
-        let start: String = playlist.name.chars().take(40).collect();
-        return Err(ExportError::Conflict(format!(
-            "The playlist name '{start}…' is longer than export.pdb can hold ({} bytes; at most {limit}). Shorten it and sync again; the USB was left as it was.",
-            row.len()
-        )));
-    }
+    ], &playlist_rows, playlists)?;
 
     progress(&ExportProgress { stage: "database", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
     incremental::count(true, false, false);
@@ -1980,6 +1865,7 @@ fn export_cancellable_inner(
     let after = snapshot::Snapshot::read_at(publication.stage(), root_name)?;
     before.check_retained_history(&after)?;
     before.check_changes_reviewed(previous.as_ref(), &after, &device_additions, &accepted)?;
+    if cancelled() { return Err(ExportError::Cancelled); }
     progress(&ExportProgress { stage: "verifying", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
     let verified_reused: BTreeSet<String> = trusted.iter().filter(|p| !publication.stage().join(p).is_file()).cloned().collect();
     let preserved: BTreeSet<String> = tracks
@@ -2051,21 +1937,52 @@ fn export_cancellable_inner(
         }
     }
     files.sort(); files.dedup();
-    // Catch another writer changing a database while this export was staging.
-    incremental::recheck();
-    for (path, expected) in &full_source_hashes {
-        if file_hash_cancellable(path, cancelled)? != *expected { return Err(ExportError::Conflict("Source changed while it was being prepared".into())); }
-    }
-    let trusted_after = incremental::trusted_paths(destination, previous.as_ref())?;
-    if !trusted.is_subset(&trusted_after) {
-        return Err(ExportError::Conflict("Exported media changed during sync. Retry after closing other writers.".into()));
-    }
-    if incremental::databases(destination)? != database_signatures || snapshot::analysis_stamp(destination, &before)? != analysis_before || incremental::inputs(requested_tracks)? != source_revisions {
-        return Err(ExportError::Conflict("The device changed during sync. Close other writers and retry.".into()));
-    }
+    incremental::timed(|| -> Result<()> {
+        // Catch another writer changing a database while this export was staging.
+        incremental::recheck();
+        for (path, expected) in &full_source_hashes {
+            if file_hash_cancellable(path, cancelled)? != *expected { return Err(ExportError::Conflict("Source changed while it was being prepared".into())); }
+        }
+        let trusted_after = incremental::trusted_paths(destination, previous.as_ref())?;
+        if !trusted.is_subset(&trusted_after) {
+            return Err(ExportError::Conflict("Exported media changed during sync. Retry after closing other writers.".into()));
+        }
+        if incremental::databases(destination)? != database_signatures || snapshot::analysis_stamp(destination, &before)? != analysis_before || incremental::inputs(requested_tracks)? != source_revisions {
+            return Err(ExportError::Conflict("The device changed during sync. Close other writers and retry.".into()));
+        }
+        Ok(())
+    }, |metrics, ms| metrics.final_guards_ms += ms)?;
     if cancelled() { return Err(ExportError::Cancelled); }
-    progress(&ExportProgress { stage: "publishing", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
-    if let Err(error) = publication.commit_retained(&files) {
+    publish(destination, root_name, &publication, &mut placement, &files, &mut manifest, &report, progress)?;
+    placement.published();
+    report.verified = true;
+    publication.check_root()?;
+    remove_emptied_folders(destination, obsolete, &retained)?;
+
+    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    report.metrics = incremental::metrics();
+    tracing::info!(elapsed_ms = report.elapsed_ms, ?report.metrics, copied_bytes = report.bytes_copied, reused = report.reused, "USB sync completed");
+    Ok(report)
+}
+
+/// Puts the staged generation in place, checks the published databases and seals the manifest describing them.
+/// Anything that fails once files are in place restores the previous library.
+#[allow(clippy::too_many_arguments, reason = "the run's publication, its files and their record")]
+fn publish(
+    destination: &Path,
+    root_name: &str,
+    publication: &rbl_core::durable::Publication,
+    placement: &mut placement::Placement,
+    files: &[PathBuf],
+    manifest: &mut Manifest,
+    report: &ExportReport,
+    progress: &mut dyn FnMut(&ExportProgress),
+) -> Result<()> {
+    let (reused, copied, converted) = (report.reused, report.tracks_added + report.tracks_updated, report.converted);
+    let mut publishing = |done, total| progress(&ExportProgress { stage: "publishing", done, total, unit: "files", reused, copied, converted, ..Default::default() });
+    publishing(0, files.len());
+    incremental::timed(|| placement.make_durable_for_commit(), |metrics, ms| metrics.in_place_flush_ms += ms)?;
+    if let Err(error) = publication.commit_retained_with_progress(files, &mut publishing) {
         if rbl_core::durable::Publication::validation_pending(destination, PUBLICATION) {
             if let Err(rollback) = publication.rollback() {
                 return Err(ExportError::Conflict(format!("Publication failed: {error}; recovery required: {rollback}")));
@@ -2075,7 +1992,7 @@ fn export_cancellable_inner(
     }
     let validate = (|| -> Result<()> {
         incremental::recheck();
-        let check = verification::verify_databases(destination)?;
+        let check = incremental::timed(|| verification::verify_databases(destination), |metrics, ms| metrics.published_check_ms += ms)?;
         if !check.is_ok() || check.tracks != report.tracks {
             return Err(ExportError::Conflict(format!("Published generation did not verify: {}", verification_failure(&check))));
         }
@@ -2083,7 +2000,7 @@ fn export_cancellable_inner(
             g.outputs = incremental::output_revisions(destination, &manifest.tracks)?;
             g.databases = incremental::databases(destination)?;
         }
-        let bytes = serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?;
+        let bytes = serde_json::to_vec_pretty(manifest).map_err(std::io::Error::other)?;
         publication.seal(Path::new(&format!("{root_name}/exportstudio/manifest.json")), &bytes)?;
         Ok(())
     })();
@@ -2093,11 +2010,14 @@ fn export_cancellable_inner(
         }
         return Err(ExportError::Conflict(format!("{error}; the previous library was restored")));
     }
+    progress(&ExportProgress { stage: "cleanup", reused, copied, converted, ..Default::default() });
     publication.finalize()?;
-    report.verified = true;
-    publication.check_root()?;
-    // Content reclamation was journaled. Empty folders are only cosmetic;
-    // remove_dir refuses any directory another writer has populated.
+    Ok(())
+}
+
+/// Content reclamation was journaled. Empty folders are only cosmetic; `remove_dir` refuses any directory another
+/// writer has populated.
+fn remove_emptied_folders(destination: &Path, obsolete: Vec<(String, bool)>, retained: &BTreeSet<String>) -> Result<()> {
     for (relative, directory) in obsolete {
         if retained.contains(&relative.to_lowercase()) { continue; }
         let path = checked_under(destination, &relative)?;
@@ -2107,11 +2027,259 @@ fn export_cancellable_inner(
             empty = dir.parent();
         }
     }
+    Ok(())
+}
 
-    report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    report.metrics = incremental::metrics();
-    tracing::info!(elapsed_ms = report.elapsed_ms, ?report.metrics, copied_bytes = report.bytes_copied, reused = report.reused, "USB sync completed");
-    Ok(report)
+/// Where a track's audio was copied: in place, or into the stage.
+fn copied(copied_to: Option<&Path>, stage: &Path, audio: &str) -> PathBuf {
+    copied_to.map_or_else(|| under(stage, audio), Path::to_path_buf)
+}
+
+/// The audio a track's copy or conversion wrote.
+struct WrittenAudio {
+    bytes: u64,
+    /// Only a plain copy hashes what it writes.
+    hash: Option<u64>,
+    /// Only the caller's converter records what it made.
+    conversion: Option<ConvertedAudio>,
+}
+
+/// The outer error stops the export; the inner one fails only this track.
+#[allow(clippy::too_many_arguments, reason = "copy progress and cancellation")]
+fn write_audio(
+    track: &SourceTrack,
+    to: &Path,
+    conversion: Option<Target<'_>>,
+    cache: Option<&cache::PreparationCache>,
+    report: &mut ExportReport,
+    (index, count): (usize, usize),
+    progress: &mut dyn FnMut(&ExportProgress),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<std::io::Result<WrittenAudio>> {
+    let copied = |(bytes, hash)| WrittenAudio { bytes, hash: Some(hash), conversion: None };
+    let transcoded = |bytes| WrittenAudio { bytes, hash: None, conversion: None };
+    let copying = |report: &ExportReport, done, total| ExportProgress { stage: "copying", done: 0, total: 0, title: track.title.clone(), unit: "bytes", bytes_done: done, bytes_total: total, reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, tracks_done: index, tracks_total: count };
+    let converting = |report: &ExportReport, done: u64, total: Option<u64>| ExportProgress { stage: "converting", done: usize::try_from(done).unwrap_or(usize::MAX), total: total.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::from(track.duration_sec) * 1000), title: track.title.clone(), unit: "milliseconds", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: count, ..Default::default() };
+    Ok(match conversion {
+        Some(Target::External(converter)) => {
+            report.converted += 1;
+            progress(&ExportProgress { stage: "converting", done: index, total: count, title: track.title.clone(), unit: "tracks", reused: report.reused, converted: report.converted, tracks_done: index, tracks_total: count, ..Default::default() });
+            converter.convert(&track.source_path, to)
+                .and_then(|made| std::fs::metadata(to).map(|m| WrittenAudio { bytes: m.len(), hash: None, conversion: Some(made) }))
+        }
+        Some(Target::Builtin(target)) => {
+            report.converted += 1;
+            let report = &*report;
+            if let Some(cache) = cache.filter(|_| !track.cache_bypass) {
+                match cache.converted(&track.source_path, target, &mut |done, total| progress(&converting(report, done, total)), cancelled) {
+                    Ok((path, _, _)) => copy_staged_observed(&path, to, &mut |done, total| {
+                        progress(&copying(report, done, total));
+                        !cancelled()
+                    }).map(copied),
+                    Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
+                    Err(e) => Err(std::io::Error::other(e.to_string())),
+                }
+            } else {
+                rbl_audio::compatibility::convert_observed(&track.source_path, to, target, &mut |done, total| {
+                    progress(&converting(report, done, total));
+                    !cancelled()
+                }).map(transcoded).map_err(|e| std::io::Error::other(format!("{}: {e}", track.title)))
+            }
+        }
+        None => copy_staged_observed(track.prepared_audio.as_deref().unwrap_or(&track.source_path), to, &mut |done, total| {
+            progress(&copying(report, done, total));
+            !cancelled()
+        }).map(copied),
+    })
+}
+
+/// A `DeviceSQL` row has to fit on one page. Without this check the page builder cuts the row off and the stick's
+/// export.pdb is corrupt, which verification reports only as the two databases disagreeing.
+fn refuse_rows_too_long_for_a_page(
+    track_rows: &[Vec<u8>],
+    tracks: &[OneLibraryTrack],
+    named: [(&str, &Intern, &[Vec<u8>]); 5],
+    playlist_rows: &[Vec<u8>],
+    playlists: &[SourcePlaylist],
+) -> Result<()> {
+    let limit = rbl_pdb::build::max_row_len(PAGE_SIZE);
+    if let Some((row, track)) = track_rows.iter().zip(tracks).find(|(row, _)| row.len() > limit) {
+        return Err(ExportError::Conflict(format!(
+            "'{}' has more text in its title, comment and other tags than export.pdb can hold for one track ({} bytes; at most {limit}). Shorten them and sync again; the USB was left as it was.",
+            track.title,
+            row.len()
+        )));
+    }
+    for (kind, names, rows) in named {
+        if let Some(((_, name), row)) = names.entries().zip(rows).find(|(_, row)| row.len() > limit) {
+            let start: String = name.chars().take(40).collect();
+            return Err(ExportError::Conflict(format!(
+                "The {kind} '{start}…' is longer than export.pdb can hold ({} bytes; at most {limit}). Shorten it and sync again; the USB was left as it was.",
+                row.len()
+            )));
+        }
+    }
+    if let Some((row, playlist)) = playlist_rows.iter().zip(playlists).find(|(row, _)| row.len() > limit) {
+        let start: String = playlist.name.chars().take(40).collect();
+        return Err(ExportError::Conflict(format!(
+            "The playlist name '{start}…' is longer than export.pdb can hold ({} bytes; at most {limit}). Shorten it and sync again; the USB was left as it was.",
+            row.len()
+        )));
+    }
+    Ok(())
+}
+
+/// An analysis file as the stick carries it: pointing at `audio_path`, shifted by any offset the converter added,
+/// with the device's VBR table, preview encoding and the library's cues.
+fn device_analysis_file(
+    extension: &str,
+    bytes: &[u8],
+    audio_path: &str,
+    offset: Option<(ConvertedAudio, &dyn AudioConverter)>,
+    transcoded: bool,
+    cues: Option<&[rbl_anlz::cues::ExportCue]>,
+) -> std::io::Result<Vec<u8>> {
+    let shifted;
+    let bytes = match offset {
+        Some((made, converter)) => { shifted = converter.shift_analysis(extension, bytes, made.offset_ms)?; &shifted }
+        None => bytes,
+    };
+    let mut parsed = rbl_anlz::parse(bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let path_bytes = rbl_anlz::AnlzBuilder::new().path(audio_path).finish();
+    let path = rbl_anlz::parse(&path_bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+    // A DAT/EXT/2EX has one PPTH. Drop it by tag rather than by
+    // decoded value, so a malformed legacy path cannot survive
+    // alongside the replacement path.
+    parsed.sections.retain(|s| s.tag != rbl_core::FourCc::new(b"PPTH"));
+    parsed.sections.splice(0..0, path.sections);
+    // Older RBXport analysis files predate the PVBR section. A
+    // freshly initialized Pioneer DAT always writes it between
+    // PPTH and PQTZ, even when there are no VBR frames. Repair
+    // those stale files while exporting rather than asking the
+    // user to re-analyse every affected track.
+    if extension.eq_ignore_ascii_case("DAT") && (transcoded || parsed.section(b"PVBR").is_none()) {
+        // Seek offsets from the source must never point into a
+        // different encoding. Compatibility outputs are PCM or
+        // CBR MP3, so they need no source VBR seek table.
+        parsed.sections.retain(|s| s.tag != rbl_core::FourCc::new(b"PVBR"));
+        parsed.sections.insert(1, rbl_anlz::write::vbr_table_zero_section());
+    }
+    parsed.sections = parsed.sections.iter().map(rbl_anlz::Section::with_export_phrase_mask).collect();
+    // Analysis written before issue #278 put whiteness bits in
+    // `PWV2` and zero-height preview columns, neither of which
+    // rekordbox writes; a Nexus player (XDJ-1000MK2) then rejects
+    // the track's whole preview, and with it the detail waveform
+    // and hot-cue markers on load. rekordbox-written `PWAV` and
+    // `PWV2` pass through unchanged.
+    parsed.sections = parsed.sections.iter().map(rbl_anlz::encode::with_device_preview).collect();
+    if let Some(cues) = cues {
+        if extension == "DAT" || extension == "EXT" {
+            parsed.sections.retain(|s| !s.is_cue_list());
+            parsed.sections.extend(rbl_anlz::cues::sections(cues, extension == "EXT"));
+        }
+    }
+    Ok(parsed.to_bytes())
+}
+
+/// Sources read again because their revision moved since the last sync.
+#[derive(Default)]
+struct SourceHashes {
+    /// Keys of tracks whose bytes are still what the stick's copy was made from.
+    unchanged: BTreeSet<String>,
+    read: BTreeMap<String, u64>,
+}
+
+fn reread_changed_sources(
+    tracks: &[SourceTrack],
+    previous: Option<&Manifest>,
+    cache: Option<&cache::PreparationCache>,
+    progress: &mut dyn FnMut(&ExportProgress),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SourceHashes> {
+    let mut hashes = SourceHashes::default();
+    let recorded_sources: BTreeMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
+    for (index, track) in tracks.iter().enumerate() {
+        if cancelled() { return Err(ExportError::Cancelled); }
+        let key = track_key(track.id, &track.source_path.to_string_lossy());
+        let Some(old) = recorded_sources.get(&key) else { continue; };
+        let revision_changed = previous.and_then(|m| m.generation.as_ref()).is_some_and(|g| {
+            g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_some_and(|old| incremental::revision(&track.source_path).is_ok_and(|now| now != *old))
+        });
+        if !revision_changed || track.source_unavailable || track.device.as_ref().is_some_and(|d| d.preserve) { continue; }
+        progress(&ExportProgress { stage: "planning", done: index, total: tracks.len(), title: track.title.clone(), unit: "tracks", ..Default::default() });
+        let hash = cache.map_or_else(|| file_hash_cancellable(&track.source_path, cancelled), |cache| cache.source_hash(&track.source_path, cancelled).map_err(std::io::Error::other));
+        if let Ok(hash) = hash {
+            let expected = if old.conversion.is_empty() { old.audio_hash } else { old.conversion_source_hash };
+            if expected != 0 && hash == expected { hashes.unchanged.insert(key.clone()); }
+            hashes.read.insert(key, hash);
+        }
+    }
+    Ok(hashes)
+}
+
+#[allow(clippy::too_many_arguments, reason = "preparation progress and cancellation")]
+fn prepare_sources(
+    destination: &Path,
+    tracks: &mut [SourceTrack],
+    previous: Option<&Manifest>,
+    cache: &cache::PreparationCache,
+    &ExportOptions { converter, compatibility, .. }: &ExportOptions<'_>,
+    source_contents_unchanged: &BTreeSet<String>,
+    db_id: u64,
+    progress: &mut dyn FnMut(&ExportProgress),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    let recorded: BTreeMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
+    let count = tracks.len();
+    for (index, track) in tracks.iter_mut().enumerate() {
+        if cancelled() { return Err(ExportError::Cancelled); }
+        if !track.source_path.is_file() || track.device.as_ref().is_some_and(|d| d.preserve) || on_stick(destination, &track.source_path).is_some() { continue; }
+        let old = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())).copied();
+        let same_source = old.is_some_and(|old| std::fs::metadata(&track.source_path).is_ok_and(|m| source_stamp(&m) == (old.size, old.modified)))
+            && previous.and_then(|m| m.generation.as_ref()).is_none_or(|g| g.inputs.get(&track.source_path.to_string_lossy().into_owned()).is_none_or(|r| incremental::revision(&track.source_path).is_ok_and(|now| now == *r)));
+        let prepared = (|| -> Result<Option<PathBuf>> {
+            // The caller's converter writes straight to the stick; nothing to prepare.
+            if let Some(converter) = converter {
+                if converter.wants(&track.source_path)? { return Ok(None); }
+            }
+            let conversion = if let Some(target) = compatibility {
+                cache.needs_conversion(&track.source_path)?.then_some(target.audio())
+            } else { None };
+            if old.is_some() && !same_source { let _ = cache.properties(&track.source_path)?; }
+            let same_profile = old.is_some_and(|old| old.conversion == conversion.map_or("", rbl_audio::compatibility::Format::profile));
+            if (same_source || source_contents_unchanged.contains(&track_key(track.id, &track.source_path.to_string_lossy()))) && same_profile { return Ok(None); }
+            if let Some(target) = conversion {
+                let (path, _, _) = cache.converted(&track.source_path, target, &mut |done, total| {
+                    progress(&ExportProgress { stage: "converting", done: usize::try_from(done).unwrap_or(usize::MAX), total: total.and_then(|n| usize::try_from(n).ok()).unwrap_or(usize::from(track.duration_sec) * 1000), unit: "milliseconds", title: track.title.clone(), tracks_done: index, tracks_total: count, ..Default::default() });
+                }, cancelled)?;
+                Ok(Some(path))
+            } else if track.device.is_some() && old.is_none() {
+                // Cold adoption is checked against the existing copy below.
+                Ok(None)
+            } else { cache.original(&track.source_path, &mut |done, total| {
+                progress(&ExportProgress { stage: "preparing", done: 0, total: 0, title: track.title.clone(), unit: "bytes", bytes_done: done, bytes_total: total, tracks_done: index, tracks_total: count, ..Default::default() });
+            }, cancelled).map(Some) }
+        })();
+        match prepared {
+            Ok(path) => track.prepared_audio = path,
+            Err(ExportError::Cancelled) => return Err(ExportError::Cancelled),
+            // Windows reports a cache folder under a file as AlreadyExists.
+            Err(ExportError::Io(error)) if matches!(error.kind(), std::io::ErrorKind::StorageFull | std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::NotADirectory | std::io::ErrorKind::AlreadyExists) && std::fs::File::open(&track.source_path).is_ok() => {
+                track.cache_bypass = true;
+            }
+            Err(error) => {
+                if let Some(fallback) = track.fallback.take().filter(|t| t.source_path.is_file()) {
+                    let id = track.id;
+                    *track = *fallback;
+                    track.id = id;
+                    track.source_unavailable = true;
+                    track.retained_reason = Some(error.to_string());
+                    if let Some(device) = &mut track.device { device.preserve = true; device.master_db_id = db_id; device.master_content_id = id; device.exported = old.is_some_and(|c| c.preserved != Some(true)); }
+                } else { track.preparation_error = Some(error.to_string()); }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The rows of the tables an export fills from the library; every other
@@ -2364,19 +2532,15 @@ fn artwork_source(image: &Path, medium: bool) -> PathBuf {
 
 /// Copies an image to its four places, skipping any already there at the
 /// same size. Returns how many files were written.
-fn write_artwork(destination: &Path, existing: &Path, root_name: &str, id: u32, image: &Path) -> Result<usize> {
+fn write_artwork(placement: &mut placement::Placement, stage: &Path, existing: &Path, root_name: &str, id: u32, image: &Path) -> Result<usize> {
     let mut written = 0;
     for (name, medium) in artwork_names(id) {
         let source = artwork_source(image, medium);
         let name = name.replacen("/PIONEER/", &format!("/{root_name}/"), 1);
-        let target = under(destination, &name);
-        if files_equal(&source, &target)? || files_equal(&source, &under(existing, &name))? {
+        if files_equal(&source, &under(stage, &name))? || files_equal(&source, &under(existing, &name))? {
             continue;
         }
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match copy_staged(&source, &target) {
+        match copy_staged(&source, &placement.target(&name)?) {
             Ok(_) => written += 1,
             Err(e) if is_device_gone(&e) => return Err(ExportError::DeviceGone),
             Err(e) => return Err(e.into()),
@@ -2584,7 +2748,7 @@ fn copy_data_observed(from: &Path, to: &Path, durable: bool, progress: &mut dyn 
     }
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let parent = to.parent().unwrap_or(Path::new("."));
-    let staging = tempfile::NamedTempFile::new_in(parent)?;
+    let staging = tempfile::Builder::new().prefix(placement::PARTIAL_PREFIX).tempfile_in(parent)?;
     let mut target = staging.reopen()?;
     let (send, receive) = std::sync::mpsc::sync_channel::<Vec<u8>>(COPY_QUEUE);
     let (ack, acknowledgements) = std::sync::mpsc::channel();

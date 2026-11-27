@@ -14,7 +14,7 @@ fn diagnostic(
     kind: ConflictKind,
     severity: Severity,
     entity: EntityKind,
-    entity_id: impl ToString,
+    entity_id: &impl ToString,
     name: impl Into<String>,
     formats: Vec<String>,
     fields: Vec<String>,
@@ -55,7 +55,7 @@ pub fn inspect_volume(
             token,
             diagnostics: vec![diagnostic(
                 "export:recovery".into(), ConflictKind::RecoveryRequired, Severity::Blocked,
-                EntityKind::Export, "publication", "Interrupted USB export", Vec::new(), Vec::new(),
+                EntityKind::Export, &"publication", "Interrupted USB export", Vec::new(), Vec::new(),
                 "An interrupted export must be recovered before changes can be inspected.", Vec::new(),
             )],
             plan: None,
@@ -108,7 +108,7 @@ fn blocked_inspection(
     let token = incremental::digest(&(destination, request, id, &detail))?;
     Ok(Inspection {
         token,
-        diagnostics: vec![diagnostic(id.into(), kind, Severity::Blocked, EntityKind::Export, id, name, Vec::new(), Vec::new(), detail, Vec::new())],
+        diagnostics: vec![diagnostic(id.into(), kind, Severity::Blocked, EntityKind::Export, &id, name, Vec::new(), Vec::new(), detail, Vec::new())],
         plan: None,
     })
 }
@@ -257,7 +257,7 @@ fn collect(
         if current.legacy.is_some() || current.one.is_some() {
             diagnostics.push(diagnostic(
                 "export:baseline-unknown".into(), ConflictKind::BaselineUnknown, Severity::Information,
-                EntityKind::Device, "usb", "Existing USB state has no trusted Export Studio baseline",
+                EntityKind::Device, &"usb", "Existing USB state has no trusted Export Studio baseline",
                 Vec::new(), Vec::new(), "Unowned content will be retained unless an explicit safe rewrite is selected.", Vec::new(),
             ));
         }
@@ -266,7 +266,7 @@ fn collect(
         if previous.db_id != db_id && (!previous.tracks.is_empty() || !previous.playlists.is_empty()) {
             diagnostics.push(diagnostic(
                 "device:ownership".into(), ConflictKind::OwnershipMismatch, Severity::Blocked,
-                EntityKind::Device, "usb", "USB belongs to a different master library", Vec::new(), Vec::new(),
+                EntityKind::Device, &"usb", "USB belongs to a different master library", Vec::new(), Vec::new(),
                 "Import or reconcile this device in Rekordbox before changing its ownership.", Vec::new(),
             ));
         }
@@ -274,7 +274,7 @@ fn collect(
             if current.identity.iter().any(|(id, owner)| baseline.identity.get(id).is_some_and(|old| old != owner)) {
                 diagnostics.push(diagnostic(
                     "device:identity".into(), ConflictKind::IdentityChanged, Severity::Blocked,
-                    EntityKind::Device, "usb", "Device track identities changed", Vec::new(), Vec::new(),
+                    EntityKind::Device, &"usb", "Device track identities changed", Vec::new(), Vec::new(),
                     "Reconcile the device before reusing its previous selection.", Vec::new(),
                 ));
             }
@@ -293,7 +293,7 @@ fn collect(
     for track in tracks.iter().filter(|track| !track.source_path.is_file()) {
         diagnostics.push(diagnostic(
             format!("asset:track:{}", track.id), ConflictKind::AssetUnavailable, Severity::Information,
-            EntityKind::Track, track.id, &track.title, Vec::new(), vec!["audio".into()],
+            EntityKind::Track, &track.id, &track.title, Vec::new(), vec!["audio".into()],
             if track.source_unavailable { "The original source is unavailable; the existing device copy is retained." } else { "The source file is unavailable; this track is skipped while the rest of the export continues." }, Vec::new(),
         ));
     }
@@ -345,7 +345,7 @@ fn collect_unowned_device_content(
             if old.is_some_and(|old| old.tracks.iter().any(|row| row.id == track.id)) || planned_tracks.contains(&track.id) { continue; }
             out.push(diagnostic(
                 format!("device_only:{format}:track:{}", track.id), ConflictKind::DeviceOnlyContent,
-                Severity::Blocked, EntityKind::Track, track.id, &track.title, vec![format.into()], Vec::new(),
+                Severity::Blocked, EntityKind::Track, &track.id, &track.title, vec![format.into()], Vec::new(),
                 "This device-only track is not part of the reconciled export and would be lost.", Vec::new(),
             ));
         }
@@ -354,7 +354,7 @@ fn collect_unowned_device_content(
             out.push(diagnostic(
                 format!("device_only:{format}:playlist:{}", playlist.id), ConflictKind::DeviceOnlyContent,
                 Severity::Blocked, if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist },
-                playlist.id, &playlist.name, vec![format.into()], Vec::new(),
+                &playlist.id, &playlist.name, vec![format.into()], Vec::new(),
                 "This device-only playlist is not part of the reconciled export and would be lost.", Vec::new(),
             ));
         }
@@ -400,7 +400,7 @@ fn collect_device_edits(
             } else { Vec::new() };
             let mut item = diagnostic(
                 format!("metadata:{format}:track:{}", row.id), ConflictKind::MetadataChanged,
-                severity, EntityKind::Track, row.id, &row.title,
+                severity, EntityKind::Track, &row.id, &row.title,
                 vec![format.to_owned()], fields.iter().map(|field| (*field).to_owned()).collect(),
                 if severity == Severity::Information { "This device-side difference is preserved by the current plan." } else if selected { "This track changed on the device and the selected library record differs." } else { "This device-side edit would be lost when the track leaves the sync selection." },
                 resolutions,
@@ -419,7 +419,7 @@ fn collect_device_edits(
             if selected_library_id.is_some_and(|id| tracks.iter().any(|track| track.id == id)) {
                 let mut item = diagnostic(
                     format!("deletion:{format}:track:{}", old.id), ConflictKind::DeviceDeletion,
-                    Severity::DecisionRequired, EntityKind::Track, old.id, &old.title, vec![format.to_owned()], Vec::new(),
+                    Severity::DecisionRequired, EntityKind::Track, &old.id, &old.title, vec![format.to_owned()], Vec::new(),
                     "This library track was deleted from the device and will be restored.", vec![Resolution::RestoreFromLibrary],
                 );
                 item.evidence.push(FieldEvidence { field: "existence".into(), baseline: Some("present".into()), device: Some("deleted".into()), library: Some("selected".into()) });
@@ -438,7 +438,7 @@ fn collect_device_edits(
             let mut item = diagnostic(
                 format!("playlist:{format}:{}", row.id), ConflictKind::PlaylistChanged,
                 severity, if row.folder { EntityKind::Folder } else { EntityKind::Playlist },
-                row.id, &row.name, vec![format.to_owned()], fields,
+                &row.id, &row.name, vec![format.to_owned()], fields,
                 if reconciled_addition && !matches_target { "The library playlist changed; the exporter will use it and retain device-added tracks separately." } else if severity == Severity::Information { "This device-side playlist is preserved by the current plan." } else if selected { "This selected playlist changed on the device; the library version can replace it." } else { "This device-side playlist edit would be lost when it leaves the sync selection." },
                 if severity == Severity::Information { Vec::new() } else { vec![if selected { Resolution::UseLibrary } else { Resolution::DiscardDeviceEdits }] },
             );
@@ -448,11 +448,13 @@ fn collect_device_edits(
         for old in &then.playlists {
             if now.playlists.iter().any(|row| row.id == old.id) { continue; }
             let selected_library_id = previous.playlists.iter().find(|row| row.export_id == old.id).map(|row| row.library_id);
-            if selected_library_id.is_some_and(|id| playlists.iter().any(|playlist| playlist.id == id)) {
+            let selected = selected_library_id.and_then(|id| playlists.iter().find(|playlist| playlist.id == id));
+            let taken_over_elsewhere = selected.is_some_and(|playlist| playlist.device_id != 0 && playlist.device_id != old.id);
+            if selected.is_some() && !taken_over_elsewhere {
                 let mut item = diagnostic(
                     format!("deletion:{format}:playlist:{}", old.id), ConflictKind::DeviceDeletion,
                     Severity::DecisionRequired, if old.folder { EntityKind::Folder } else { EntityKind::Playlist },
-                    old.id, &old.name, vec![format.to_owned()], Vec::new(),
+                    &old.id, &old.name, vec![format.to_owned()], Vec::new(),
                     "This selected playlist was deleted from the device and will be restored.", vec![Resolution::RestoreFromLibrary],
                 );
                 item.evidence.push(FieldEvidence { field: "existence".into(), baseline: Some("present".into()), device: Some("deleted".into()), library: Some("selected".into()) });
@@ -581,7 +583,7 @@ fn collect_tag_edits(
         };
         let mut item = diagnostic(
             format!("tag:{}", tag.id), ConflictKind::MetadataChanged, severity, EntityKind::Tag,
-            tag.id, &tag.name, vec!["OneLibrary".into()], vec!["name_or_hierarchy".into()],
+            &tag.id, &tag.name, vec!["OneLibrary".into()], vec!["name_or_hierarchy".into()],
             if severity == Severity::DecisionRequired { "This My Tag changed on the device and the library version differs." } else { "The device-only tag is preserved by the current plan." },
             if severity == Severity::DecisionRequired { vec![Resolution::UseLibrary] } else { Vec::new() },
         );
@@ -613,7 +615,7 @@ fn collect_tag_edits(
             .map_or_else(|| format!("USB track {device_id}"), |track| track.title.clone());
         let mut item = diagnostic(
             format!("tag_membership:{device_id}"), ConflictKind::MetadataChanged, Severity::DecisionRequired,
-            EntityKind::Track, library_id, name, vec!["OneLibrary".into()], vec!["my_tag_membership".into()],
+            EntityKind::Track, &library_id, name, vec!["OneLibrary".into()], vec!["my_tag_membership".into()],
             "My Tag membership changed on the device.", vec![resolution],
         );
         item.evidence.push(FieldEvidence {
@@ -636,7 +638,7 @@ fn collect_cue_edits(current: &Snapshot, baseline: &Snapshot, tracks: &[SourceTr
     if !unowned_rows.is_empty() {
         out.push(diagnostic(
             format!("cue_grid:unknown:{}", crate::manifest::hash(unowned_rows.iter().flat_map(|row| row.bytes()).collect::<Vec<_>>().as_slice())),
-            ConflictKind::CueGridChanged, Severity::Blocked, EntityKind::Export, "unknown-cue-rows",
+            ConflictKind::CueGridChanged, Severity::Blocked, EntityKind::Export, &"unknown-cue-rows",
             "Unrecognized device cue data", vec!["OneLibrary".into()], vec!["unmapped_cue_rows".into()],
             "Changed cue rows could not be mapped to device track identities; the sync cannot prove they will be retained.", Vec::new(),
         ));
@@ -666,7 +668,7 @@ fn collect_cue_edits(current: &Snapshot, baseline: &Snapshot, tracks: &[SourceTr
         let current_rows: Vec<_> = current.cues.iter().filter(|row| snapshot::cue_content(row) == Some(id)).collect();
         let mut item = diagnostic(
             format!("cue_grid:track:{id}"), ConflictKind::CueGridChanged, severity,
-            EntityKind::Track, id, title, vec!["OneLibrary".into()], vec!["cues".into()],
+            EntityKind::Track, &id, title, vec!["OneLibrary".into()], vec!["cues".into()],
             detail,
             resolutions,
         );
@@ -710,7 +712,7 @@ fn collect_analysis_edits(
         let mut item = diagnostic(
             format!("cue_grid:track:{}", track.export_id), ConflictKind::CueGridChanged,
             if retained { Severity::Information } else { Severity::DecisionRequired },
-            EntityKind::Track, track.library_id, name, vec!["ANLZ".into()],
+            EntityKind::Track, &track.library_id, name, vec!["ANLZ".into()],
             changed.iter().map(|evidence| evidence.field.clone()).collect(),
             if retained { "Device analysis changed. The library version is used when present; otherwise usable device analysis is retained." } else { "Device analysis changed and would be removed with this track." },
             if retained { Vec::new() } else { vec![Resolution::DiscardDeviceEdits] },
@@ -732,7 +734,7 @@ fn collect_history_losses(current: &Snapshot, tracks: &[SourceTrack], previous: 
         let histories: Vec<_> = current.history.iter().filter(|history| history.tracks.contains(&id)).map(|history| history.name.as_str()).collect();
         let mut item = diagnostic(
             format!("history:track:{id}"), ConflictKind::HistoryReference, Severity::Blocked,
-            EntityKind::Track, id, title, vec!["OneLibrary".into()], vec!["history_reference".into()],
+            EntityKind::Track, &id, title, vec!["OneLibrary".into()], vec!["history_reference".into()],
             "USB play history still references this track. Import and clear the history before removing it.", Vec::new(),
         );
         item.evidence.push(FieldEvidence { field: "history_reference".into(), baseline: None, device: Some(format!("referenced by {histories:?}")), library: None });
@@ -756,7 +758,7 @@ fn collect_format_differences(
             let mut item = diagnostic(
                 format!("format:track:{}:missing-one-library", track.id), ConflictKind::CrossFormatDivergence,
                 if is_rewritten { Severity::Information } else { Severity::Blocked }, EntityKind::Track,
-                track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_one_library".into()],
+                &track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_one_library".into()],
                 if is_rewritten { "The selected track will be written to both formats." } else { "This track exists in only one device format and is not selected for a safe rewrite." }, Vec::new(),
             );
             item.evidence.push(FieldEvidence { field: "existence".into(), baseline: None, device: Some("present".into()), library: Some("absent".into()) });
@@ -769,7 +771,7 @@ fn collect_format_differences(
         let mut item = diagnostic(
             format!("format:track:{}", track.id), ConflictKind::CrossFormatDivergence,
             if rewritten { Severity::Information } else { Severity::Blocked }, EntityKind::Track,
-            track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], fields.iter().map(|field| (*field).to_owned()).collect(),
+            &track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], fields.iter().map(|field| (*field).to_owned()).collect(),
             if rewritten { "The selected library record will rewrite this track consistently in both device formats." } else { "The two device libraries disagree; ownership cannot be inferred safely." }, Vec::new(),
         );
         item.evidence = fields.iter().map(|field| FieldEvidence {
@@ -786,7 +788,7 @@ fn collect_format_differences(
         let mut item = diagnostic(
             format!("format:track:{}:missing-device-library", track.id), ConflictKind::CrossFormatDivergence,
             if is_rewritten { Severity::Information } else { Severity::Blocked }, EntityKind::Track,
-            track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_device_library".into()],
+            &track.id, &track.title, vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_device_library".into()],
             if is_rewritten { "The selected track will be written to both formats." } else { "This track exists in only one device format and is not selected for a safe rewrite." }, Vec::new(),
         );
         item.evidence.push(FieldEvidence { field: "existence".into(), baseline: None, device: Some("absent".into()), library: Some("present".into()) });
@@ -802,7 +804,7 @@ fn collect_format_differences(
             let mut item = diagnostic(
                 format!("format:playlist:{}:missing-one-library", playlist.id), ConflictKind::CrossFormatDivergence,
                 if selected { Severity::Information } else { Severity::Blocked },
-                if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, playlist.id, &playlist.name,
+                if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, &playlist.id, &playlist.name,
                 vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_one_library".into()],
                 if selected { "The selected playlist will be written to both formats." } else { "This playlist exists in only one device format and is not selected for a safe rewrite." }, Vec::new(),
             );
@@ -816,7 +818,7 @@ fn collect_format_differences(
         let mut item = diagnostic(
             format!("format:playlist:{}", playlist.id), ConflictKind::CrossFormatDivergence,
             if selected { Severity::Information } else { Severity::Blocked },
-            if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, playlist.id, &playlist.name,
+            if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, &playlist.id, &playlist.name,
             vec!["Device Library".into(), "OneLibrary".into()], fields.clone(),
             if selected { "The selected library playlist will rewrite this row in both formats." } else { "The device formats disagree and this playlist is not selected for a safe rewrite." }, Vec::new(),
         );
@@ -834,7 +836,7 @@ fn collect_format_differences(
         let mut item = diagnostic(
             format!("format:playlist:{}:missing-device-library", playlist.id), ConflictKind::CrossFormatDivergence,
             if selected { Severity::Information } else { Severity::Blocked },
-            if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, playlist.id, &playlist.name,
+            if playlist.folder { EntityKind::Folder } else { EntityKind::Playlist }, &playlist.id, &playlist.name,
             vec!["Device Library".into(), "OneLibrary".into()], vec!["missing_in_device_library".into()],
             if selected { "The selected playlist will be written to both formats." } else { "This playlist exists in only one device format and is not selected for a safe rewrite." }, Vec::new(),
         );
@@ -885,7 +887,7 @@ fn collect_asset_changes(
                     diagnostic_id,
                     ConflictKind::AssetUnavailable,
                     if blocking { Severity::Blocked } else { Severity::Information },
-                    EntityKind::Track, track.id, &track.title, Vec::new(), vec![kind.into()],
+                    EntityKind::Track, &track.id, &track.title, Vec::new(), vec![kind.into()],
                     if blocking { "A source audio asset recorded by the previous export is missing." } else { "A previously available companion asset is missing; the exporter will preserve usable device data when possible." },
                     Vec::new(),
                 );
@@ -900,7 +902,7 @@ fn collect_asset_changes(
             }
             out.push(diagnostic(
                 diagnostic_id,
-                ConflictKind::AssetChanged, Severity::Information, EntityKind::Track, track.id,
+                ConflictKind::AssetChanged, Severity::Information, EntityKind::Track, &track.id,
                 &track.title, Vec::new(), vec![kind.into()],
                 "This source asset changed since the previous export and will be checked or refreshed.", Vec::new(),
             ));

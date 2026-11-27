@@ -77,7 +77,39 @@ pub struct Progress {
     pub stage: &'static str,
     pub done: usize,
     pub total: usize,
+    /// `tracks`, or `files` while publishing.
+    pub unit: &'static str,
+    pub file: Option<FileProgress>,
     pub title: String,
+}
+
+/// Through the file being copied or converted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileProgress {
+    pub done: u64,
+    pub total: u64,
+    /// `bytes`, or `milliseconds` of audio converted.
+    pub unit: &'static str,
+}
+
+impl From<&rbl_export::ExportProgress> for Progress {
+    fn from(event: &rbl_export::ExportProgress) -> Self {
+        let per_file = event.tracks_total > 0;
+        let file = match event.unit {
+            "bytes" if per_file => Some(FileProgress { done: event.bytes_done, total: event.bytes_total, unit: "bytes" }),
+            "milliseconds" if per_file => Some(FileProgress { done: event.done as u64, total: event.total as u64, unit: "milliseconds" }),
+            _ => None,
+        };
+        let (done, total) = if per_file { (event.tracks_done, event.tracks_total) } else { (event.done, event.total) };
+        Self {
+            stage: event.stage,
+            done,
+            total,
+            unit: if event.unit == "files" { "files" } else { "tracks" },
+            file,
+            title: event.title.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +123,8 @@ pub struct Report {
     pub skipped: Vec<String>,
     pub failed: Vec<String>,
     pub one_library: bool,
+    pub elapsed_ms: u64,
+    pub metrics: rbl_export::incremental::Metrics,
 }
 
 impl Error {
@@ -168,19 +202,7 @@ pub fn export(
             converter: options.converter(),
             ..Default::default()
         },
-        &mut |event| {
-            let (done, total) = if event.tracks_total > 0 && event.total == 0 {
-                (event.tracks_done, event.tracks_total)
-            } else {
-                (event.done, event.total)
-            };
-            progress(&Progress {
-                stage: event.stage,
-                done,
-                total,
-                title: event.title.clone(),
-            });
-        },
+        &mut |event| progress(&Progress::from(event)),
         cancelled,
     )?;
     Ok(Report {
@@ -193,6 +215,8 @@ pub fn export(
         skipped: report.skipped,
         failed: report.failed,
         one_library: report.one_library,
+        elapsed_ms: report.elapsed_ms,
+        metrics: report.metrics,
     })
 }
 
@@ -210,6 +234,33 @@ pub fn recover(destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use rb_model::source::{Playlist, Track};
+
+    #[test]
+    fn a_copy_reports_the_tracks_done_and_the_bytes_of_the_current_file() {
+        let event = rbl_export::ExportProgress {
+            stage: "copying", unit: "bytes", bytes_done: 512, bytes_total: 2048, tracks_done: 3, tracks_total: 10, ..Default::default()
+        };
+        let progress = Progress::from(&event);
+        assert_eq!((progress.done, progress.total, progress.unit), (3, 10, "tracks"));
+        assert_eq!(progress.file, Some(FileProgress { done: 512, total: 2048, unit: "bytes" }));
+    }
+
+    #[test]
+    fn a_conversion_reports_the_milliseconds_converted_of_the_current_file() {
+        let event = rbl_export::ExportProgress {
+            stage: "converting", unit: "milliseconds", done: 30_000, total: 240_000, tracks_done: 1, tracks_total: 4, ..Default::default()
+        };
+        let progress = Progress::from(&event);
+        assert_eq!((progress.done, progress.total), (1, 4));
+        assert_eq!(progress.file, Some(FileProgress { done: 30_000, total: 240_000, unit: "milliseconds" }));
+    }
+
+    #[test]
+    fn publishing_reports_files_put_in_place() {
+        let event = rbl_export::ExportProgress { stage: "publishing", unit: "files", done: 412, total: 1180, ..Default::default() };
+        let progress = Progress::from(&event);
+        assert_eq!((progress.done, progress.total, progress.unit, progress.file), (412, 1180, "files", None));
+    }
 
     #[test]
     fn invalid_source_records_do_not_create_a_destination() {
