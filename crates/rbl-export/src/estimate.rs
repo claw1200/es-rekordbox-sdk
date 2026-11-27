@@ -122,9 +122,14 @@ pub(crate) fn estimate_inspected(
         let carried = recorded.get(&key).copied();
         // The stick's own copy of a track another writer exported from this
         // library, which the sync keeps as it is (`adopted_paths`).
-        let adopted = carried.is_none() && conversion.is_none() && track.id != 0
-            && held.get(&track.id).is_some_and(|audio| {
-                std::fs::metadata(under(destination, audio)).is_ok_and(|m| m.is_file() && m.len() == size)
+        // The row reconciliation took over names the copy; failing that, the
+        // first row the stick holds for the track.
+        let held_audio = track.device.as_ref().filter(|d| !d.preserve && !d.audio.is_empty()).map(|d| &d.audio).or_else(|| held.get(&track.id));
+        let recorded_here = |audio: &String| carried.is_some_and(|c| path_key(&c.audio) == path_key(audio));
+        let adopted = conversion.is_none() && track.id != 0
+            && held_audio.is_some_and(|audio| {
+                !recorded_here(audio)
+                    && std::fs::metadata(under(destination, audio)).is_ok_and(|m| m.is_file() && m.len() == size)
                     && claimed.insert(path_key(audio))
             });
         if adopted {

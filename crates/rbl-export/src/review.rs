@@ -448,7 +448,9 @@ fn collect_device_edits(
         for old in &then.playlists {
             if now.playlists.iter().any(|row| row.id == old.id) { continue; }
             let selected_library_id = previous.playlists.iter().find(|row| row.export_id == old.id).map(|row| row.library_id);
-            if selected_library_id.is_some_and(|id| playlists.iter().any(|playlist| playlist.id == id)) {
+            let selected = selected_library_id.and_then(|id| playlists.iter().find(|playlist| playlist.id == id));
+            let taken_over_elsewhere = selected.is_some_and(|playlist| playlist.device_id != 0 && playlist.device_id != old.id);
+            if selected.is_some() && !taken_over_elsewhere {
                 let mut item = diagnostic(
                     format!("deletion:{format}:playlist:{}", old.id), ConflictKind::DeviceDeletion,
                     Severity::DecisionRequired, if old.folder { EntityKind::Folder } else { EntityKind::Playlist },

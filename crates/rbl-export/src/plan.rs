@@ -17,6 +17,8 @@ pub struct SyncPlan {
     /// The selected playlists edited on the stick that this sync writes on
     /// purpose; see [`crate::reconcile::Prepared::device_additions`].
     pub device_additions: std::collections::BTreeSet<u32>,
+    /// See [`crate::reconcile::Prepared::replaced`].
+    pub(crate) replaced: Vec<crate::reconcile::ReplacedCopy>,
 }
 
 pub fn preview(destination: &Path, tracks: &[SourceTrack], playlists: &[SourcePlaylist], tags: &[SourceMyTag], options: &ExportOptions<'_>) -> Result<SyncPlan> {
@@ -36,7 +38,7 @@ pub fn preview(destination: &Path, tracks: &[SourceTrack], playlists: &[SourcePl
             estimate: crate::estimate::Estimate { tracks_kept: manifest.tracks.len(), reuse_bytes: manifest.tracks.iter().map(|t| t.copy_stamp.map_or(t.size, |s| s.0)).sum(), ..Default::default() },
             database_bytes: 0, asset_bytes: 0, peak_bytes: 0, net_additional_bytes: 0,
             approximate: false, unknown_size: false, kept_existing: manifest.generation.as_ref().map_or(0, |g| g.kept_existing),
-            device_additions: std::collections::BTreeSet::new() });
+            device_additions: std::collections::BTreeSet::new(), replaced: Vec::new() });
     }
     let mut before = previous.as_ref().filter(|m| m.generation.as_ref().is_some_and(|g| g.databases == signatures))
         .and_then(|m| m.baseline.clone()).map_or_else(|| Snapshot::read(destination), Ok)?;
@@ -49,7 +51,7 @@ pub fn preview(destination: &Path, tracks: &[SourceTrack], playlists: &[SourcePl
 
 pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Option<&Manifest>, tracks: &[SourceTrack], playlists: &[SourcePlaylist], options: &ExportOptions<'_>, record: Option<&crate::sync_record::SyncRecord>) -> Result<SyncPlan> {
     let db_id = options.sync.map_or(0, |s| s.db_id);
-    let crate::reconcile::Prepared { tracks, playlists, device_additions } = crate::reconcile::prepare(destination, before, previous, tracks, playlists, db_id, options.keep_unlisted, record)?;
+    let crate::reconcile::Prepared { tracks, playlists, device_additions, replaced } = crate::reconcile::prepare(destination, before, previous, tracks, playlists, db_id, options.keep_unlisted, record)?;
     let estimate = crate::estimate::estimate_inspected(destination, db_id, &tracks, false, options.compatibility, options.converter, Some(before), options.cache);
     let trusted = incremental::trusted_paths(destination, previous)?;
     let recorded: std::collections::HashMap<_, _> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), t)).collect();
@@ -103,7 +105,7 @@ pub(crate) fn from_baseline(destination: &Path, before: &Snapshot, previous: Opt
     });
     let unknown_size = uncertain_revisions || estimate.uncertain_adoption_bytes > 0 || ((options.compatibility.is_some() || options.converter.is_some()) && tracks.iter().any(|t| t.duration_sec == 0 && !t.device.as_ref().is_some_and(|d| d.preserve)));
     Ok(SyncPlan { tracks, playlists, approximate: true, estimate, database_bytes, asset_bytes, peak_bytes,
-        net_additional_bytes: i64::try_from(net).unwrap_or(if net < 0 { i64::MIN } else { i64::MAX }), unknown_size, kept_existing, device_additions })
+        net_additional_bytes: i64::try_from(net).unwrap_or(if net < 0 { i64::MIN } else { i64::MAX }), unknown_size, kept_existing, device_additions, replaced })
 }
 
 fn allocation(bytes: u64) -> u64 { bytes.div_ceil(4096).saturating_mul(4096) }

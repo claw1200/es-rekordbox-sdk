@@ -592,12 +592,13 @@ fn in_place_paths(destination: &Path, tracks: &[SourceTrack], previous: &BTreeSe
 #[allow(clippy::too_many_arguments, reason = "cold adoption progress and cancellation")]
 fn adopted_paths(destination: &Path, tracks: &[SourceTrack], previous: Option<&Manifest>, in_place: &[Option<String>], db_id: u64, progress: &mut dyn FnMut(&ExportProgress), cancelled: &dyn Fn() -> bool) -> Result<Vec<Option<String>>> {
     if db_id == 0 { return Ok(vec![None; tracks.len()]); }
-    let recorded: BTreeSet<String> = previous.into_iter().flat_map(|m| &m.tracks).map(ManifestTrack::key).collect();
+    let recorded: BTreeMap<String, String> = previous.into_iter().flat_map(|m| &m.tracks).map(|t| (t.key(), path_key(&t.audio))).collect();
     let mut claimed: BTreeSet<String> = in_place.iter().flatten().map(|path| path_key(path)).collect();
     tracks.iter().zip(in_place).enumerate().map(|(index, (track, in_place))| -> Result<Option<String>> {
         let candidate = (|| {
         let device = track.device.as_ref().filter(|d| !d.preserve && !d.audio.is_empty())?;
-        if in_place.is_some() || recorded.contains(&track_key(track.id, &track.source_path.to_string_lossy())) { return None; }
+        let recorded_here = recorded.get(&track_key(track.id, &track.source_path.to_string_lossy())).is_some_and(|audio| *audio == path_key(&device.audio));
+        if in_place.is_some() || recorded_here { return None; }
         let source = std::fs::metadata(&track.source_path).ok()?;
         let copy = std::fs::metadata(under(destination, &device.audio)).ok()?;
         (copy.is_file() && copy.len() == source.len()).then(|| device.audio.clone())
@@ -656,6 +657,27 @@ fn layouts(tracks: &[SourceTrack], ids: &[u32], root: &str, previous: Option<&Ma
         }
         place
     }).collect()
+}
+
+/// What another writer's copy of a selected track leaves behind once the export no longer uses it: its analysis,
+/// and its audio when that is the library's own file, so nothing the library doesn't hold is lost.
+struct UnusedCopy {
+    audio: Option<PathBuf>,
+    analysis: Vec<PathBuf>,
+}
+
+impl UnusedCopy {
+    fn of(destination: &Path, copy: &reconcile::ReplacedCopy, track: &SourceTrack, written_audio: &BTreeSet<String>, written_analysis: &BTreeSet<String>) -> Result<Self> {
+        let audio = copy.audio.trim_start_matches('/');
+        let audio_unused = !written_audio.contains(&path_key(&copy.audio)) && files_equal(&track.source_path, &under(destination, audio))?;
+        let analysis_unused = !copy.analysis_dir.is_empty() && !written_analysis.contains(&path_key(&copy.analysis_dir));
+        let analysis = if analysis_unused {
+            ["DAT", "EXT", "2EX"]
+                .map(|extension| format!("{}/ANLZ0000.{extension}", copy.analysis_dir.trim_start_matches('/')))
+                .into_iter().filter(|file| under(destination, file).is_file()).map(PathBuf::from).collect()
+        } else { Vec::new() };
+        Ok(Self { audio: audio_unused.then(|| PathBuf::from(audio)), analysis })
+    }
 }
 
 /// The stick's record of a track this export carries but does not own.
@@ -1076,7 +1098,7 @@ fn export_cancellable_inner(
     if !plan.unknown_size && fs2::available_space(destination)? < plan.peak_bytes {
         return Err(ExportError::Conflict(format!("Not enough temporary space to sync safely: approximately {} bytes required while the previous library is retained", plan.peak_bytes)));
     }
-    let (mut tracks, playlists, device_additions) = (plan.tracks, plan.playlists, plan.device_additions);
+    let (mut tracks, playlists, device_additions, replaced) = (plan.tracks, plan.playlists, plan.device_additions, plan.replaced);
     let SourceHashes { unchanged: source_contents_unchanged, read: inspected_source_hashes } =
         reread_changed_sources(&tracks, previous.as_ref(), cache, progress, cancelled)?;
     if let Some(cache) = cache {
@@ -1723,6 +1745,17 @@ fn export_cancellable_inner(
         if !owns_library_file(destination, entry) { obsolete.push((entry.audio.clone(), false)); }
         obsolete.push((entry.anlz_dir.clone(), true));
         report.removed += 1;
+    }
+    for copy in &replaced {
+        let unused = UnusedCopy::of(destination, copy, &tracks[copy.track], &written_audio_paths, &written_analysis_paths)?;
+        if let Some(audio) = unused.audio {
+            obsolete.push((copy.audio.clone(), false));
+            deletions.push(audio);
+        }
+        if !unused.analysis.is_empty() {
+            obsolete.push((copy.analysis_dir.clone(), true));
+            deletions.extend(unused.analysis);
+        }
     }
 
     // Playlists reference export ids, so they are built after the tracks.
