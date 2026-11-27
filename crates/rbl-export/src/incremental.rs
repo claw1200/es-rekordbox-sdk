@@ -6,6 +6,7 @@ use crate::{Manifest, ManifestTrack, SourceTrack, SourcePlaylist, SourceMyTag, E
 pub const TRANSFORM_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Metrics {
     pub audio_bytes_read: u64,
     pub analysis_bytes_read: u64,
@@ -14,6 +15,18 @@ pub struct Metrics {
     pub database_builds: u64,
     pub conversions: u64,
     pub probes: u64,
+    pub file_flushes: u64,
+    pub directory_flushes: u64,
+    pub flushing_ms: u64,
+    pub staged_images_ms: u64,
+    pub publishing_ms: u64,
+    pub retiring_ms: u64,
+    pub final_guards_ms: u64,
+    pub published_check_ms: u64,
+}
+
+fn millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 thread_local! {
@@ -32,8 +45,30 @@ impl Drop for Inspection {
 }
 pub(crate) fn recheck() { REVISIONS.with(|r| { if let Some(map) = &mut *r.borrow_mut() { map.clear(); } }); }
 
-pub fn reset_metrics() { METRICS.with(|m| *m.borrow_mut() = Metrics::default()); }
-pub fn metrics() -> Metrics { METRICS.with(|m| m.borrow().clone()) }
+pub fn reset_metrics() {
+    METRICS.with(|m| *m.borrow_mut() = Metrics::default());
+    rbl_core::durable::reset_flush_cost();
+}
+
+pub fn metrics() -> Metrics {
+    let flushes = rbl_core::durable::flush_cost();
+    Metrics {
+        file_flushes: flushes.file_flushes,
+        directory_flushes: flushes.directory_flushes,
+        flushing_ms: millis(flushes.flushing),
+        staged_images_ms: millis(flushes.staged_images),
+        publishing_ms: millis(flushes.publishing),
+        retiring_ms: millis(flushes.retiring),
+        ..METRICS.with(|m| m.borrow().clone())
+    }
+}
+
+pub(crate) fn timed<T>(work: impl FnOnce() -> T, record: impl FnOnce(&mut Metrics, u64)) -> T {
+    let started = std::time::Instant::now();
+    let result = work();
+    METRICS.with(|m| record(&mut m.borrow_mut(), millis(started.elapsed())));
+    result
+}
 pub(crate) fn count(build: bool, convert: bool, probe: bool) {
     METRICS.with(|m| { let mut m = m.borrow_mut(); m.database_builds += u64::from(build); m.conversions += u64::from(convert); m.probes += u64::from(probe); });
 }

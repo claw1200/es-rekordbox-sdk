@@ -224,9 +224,11 @@ pub struct ExportProgress {
     pub reused: usize,
     pub copied: usize,
     pub converted: usize,
-    /// `checking`, `copying`, `database`, `verifying`, or `publishing`.
+    /// `checking`, `planning`, `converting`, `preparing`, `copying`,
+    /// `database`, `verifying`, `publishing` or `cleanup`.
     pub stage: &'static str,
-    /// Tracks dealt with so far, copied, reused or skipped.
+    /// Tracks dealt with so far, copied, reused or skipped; while
+    /// `publishing`, files put in place.
     pub done: usize,
     pub total: usize,
     /// The track just dealt with.
@@ -2051,21 +2053,26 @@ fn export_cancellable_inner(
         }
     }
     files.sort(); files.dedup();
-    // Catch another writer changing a database while this export was staging.
-    incremental::recheck();
-    for (path, expected) in &full_source_hashes {
-        if file_hash_cancellable(path, cancelled)? != *expected { return Err(ExportError::Conflict("Source changed while it was being prepared".into())); }
-    }
-    let trusted_after = incremental::trusted_paths(destination, previous.as_ref())?;
-    if !trusted.is_subset(&trusted_after) {
-        return Err(ExportError::Conflict("Exported media changed during sync. Retry after closing other writers.".into()));
-    }
-    if incremental::databases(destination)? != database_signatures || snapshot::analysis_stamp(destination, &before)? != analysis_before || incremental::inputs(requested_tracks)? != source_revisions {
-        return Err(ExportError::Conflict("The device changed during sync. Close other writers and retry.".into()));
-    }
+    incremental::timed(|| -> Result<()> {
+        // Catch another writer changing a database while this export was staging.
+        incremental::recheck();
+        for (path, expected) in &full_source_hashes {
+            if file_hash_cancellable(path, cancelled)? != *expected { return Err(ExportError::Conflict("Source changed while it was being prepared".into())); }
+        }
+        let trusted_after = incremental::trusted_paths(destination, previous.as_ref())?;
+        if !trusted.is_subset(&trusted_after) {
+            return Err(ExportError::Conflict("Exported media changed during sync. Retry after closing other writers.".into()));
+        }
+        if incremental::databases(destination)? != database_signatures || snapshot::analysis_stamp(destination, &before)? != analysis_before || incremental::inputs(requested_tracks)? != source_revisions {
+            return Err(ExportError::Conflict("The device changed during sync. Close other writers and retry.".into()));
+        }
+        Ok(())
+    }, |metrics, ms| metrics.final_guards_ms += ms)?;
     if cancelled() { return Err(ExportError::Cancelled); }
-    progress(&ExportProgress { stage: "publishing", done: 0, total: 0, title: String::new(), reused: report.reused, copied: report.tracks_added + report.tracks_updated, converted: report.converted, ..Default::default() });
-    if let Err(error) = publication.commit_retained(&files) {
+    let (reused, copied, converted) = (report.reused, report.tracks_added + report.tracks_updated, report.converted);
+    let mut publishing = |done, total| progress(&ExportProgress { stage: "publishing", done, total, unit: "files", reused, copied, converted, ..Default::default() });
+    publishing(0, files.len());
+    if let Err(error) = publication.commit_retained_with_progress(&files, &mut publishing) {
         if rbl_core::durable::Publication::validation_pending(destination, PUBLICATION) {
             if let Err(rollback) = publication.rollback() {
                 return Err(ExportError::Conflict(format!("Publication failed: {error}; recovery required: {rollback}")));
@@ -2075,7 +2082,7 @@ fn export_cancellable_inner(
     }
     let validate = (|| -> Result<()> {
         incremental::recheck();
-        let check = verification::verify_databases(destination)?;
+        let check = incremental::timed(|| verification::verify_databases(destination), |metrics, ms| metrics.published_check_ms += ms)?;
         if !check.is_ok() || check.tracks != report.tracks {
             return Err(ExportError::Conflict(format!("Published generation did not verify: {}", verification_failure(&check))));
         }
@@ -2093,6 +2100,7 @@ fn export_cancellable_inner(
         }
         return Err(ExportError::Conflict(format!("{error}; the previous library was restored")));
     }
+    progress(&ExportProgress { stage: "cleanup", reused, copied, converted, ..Default::default() });
     publication.finalize()?;
     report.verified = true;
     publication.check_root()?;

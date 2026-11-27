@@ -2,7 +2,41 @@
 //! rename and the containing directory flushed afterwards on Unix.
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::cell::RefCell;
+use std::time::{Duration, Instant};
+
+/// What making writes durable cost this thread, to profile a sync on a real stick.
+#[derive(Debug, Clone, Default)]
+pub struct FlushCost {
+    pub file_flushes: u64,
+    pub directory_flushes: u64,
+    pub flushing: Duration,
+    pub staged_images: Duration,
+    pub publishing: Duration,
+    pub retiring: Duration,
+}
+
+thread_local! {
+    static FLUSH_COST: RefCell<FlushCost> = RefCell::new(FlushCost::default());
+}
+
+pub fn reset_flush_cost() {
+    FLUSH_COST.with(|cost| *cost.borrow_mut() = FlushCost::default());
+}
+
+#[must_use]
+pub fn flush_cost() -> FlushCost {
+    FLUSH_COST.with(|cost| cost.borrow().clone())
+}
+
+fn unobserved(_done: usize, _total: usize) {}
+
+fn charge<T>(work: impl FnOnce() -> T, record: impl FnOnce(&mut FlushCost, Duration)) -> T {
+    let started = Instant::now();
+    let result = work();
+    FLUSH_COST.with(|cost| record(&mut cost.borrow_mut(), started.elapsed()));
+    result
+}
 
 /// Flushes a directory's entries to the device, with [`flush`].
 ///
@@ -12,7 +46,13 @@ use std::time::Duration;
 /// tolerating every error from `F_FULLFSYNC` alone.
 pub fn sync_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    if let Err(error) = flush(&std::fs::File::open(path)?) {
+    if let Err(error) = charge(
+        || std::fs::File::open(path).and_then(|directory| flush_with(&directory, std::fs::File::sync_all)),
+        |cost, spent| {
+            cost.directory_flushes += 1;
+            cost.flushing += spent;
+        },
+    ) {
         // Some removable filesystems mounted by macOS, notably exFAT, allow
         // the file and rename flushes above but reject fsync on a directory
         // with ENOTSUP (os error 45). The directory flush is an extra
@@ -39,7 +79,13 @@ pub fn sync_dir(path: &Path) -> std::io::Result<()> {
 /// for this file system"], and so does this. The data still reaches the
 /// device; only the drive-cache barrier is lost. Every other error stays.
 pub fn flush(file: &std::fs::File) -> std::io::Result<()> {
-    flush_with(file, std::fs::File::sync_all)
+    charge(
+        || flush_with(file, std::fs::File::sync_all),
+        |cost, spent| {
+            cost.file_flushes += 1;
+            cost.flushing += spent;
+        },
+    )
 }
 
 /// [`flush`] with the full flush supplied, so a test can stand in for a
@@ -394,8 +440,17 @@ impl Publication {
     }
     /// Publish while retaining both generations until independent validation.
     pub fn commit_retained(&self, paths: &[PathBuf]) -> std::io::Result<()> {
+        self.commit_retained_with_progress(paths, &mut unobserved)
+    }
+
+    /// [`Self::commit_retained`], calling `published(done, total)` as each file is put in place.
+    pub fn commit_retained_with_progress(
+        &self,
+        paths: &[PathBuf],
+        published: &mut dyn FnMut(usize, usize),
+    ) -> std::io::Result<()> {
         write(&self.stage.path().join(".verification-required"), b"1")?;
-        self.commit(paths)
+        self.commit_with_progress(paths, published)
     }
 
     /// Mark independently verified files committed before reclaiming old images.
@@ -419,7 +474,7 @@ impl Publication {
             std::fs::remove_file(&marker)?;
             sync_dir(journal)?;
         }
-        Self::finish(root, journal, false)
+        Self::finish(root, journal, false, &mut unobserved)
     }
 
     /// Restore the complete previous generation, with replayable rollback intent.
@@ -505,7 +560,7 @@ impl Publication {
             if !recover_pending {
                 return Err(std::io::Error::other("Device recovery is required before publication"));
             }
-            Self::finish(root, &journal, true)?;
+            Self::finish(root, &journal, true, &mut unobserved)?;
         }
         // Under the exclusive lock nothing else is using a stage, so any
         // left here belonged to an export that stopped or could not delete
@@ -534,12 +589,12 @@ impl Publication {
         self.stage.path()
     }
 
-    /// Missing staged files mean deletion. Paths are relative to root, and
-    /// are the names the files are published under.
-    pub fn commit(&self, paths: &[std::path::PathBuf]) -> std::io::Result<()> {
-        self.check_root()?;
-        validate_paths(paths)?;
-        let moves = Self::moves(self.stage.path())?;
+    /// Flushes every staged image and its folders, and records what each path will replace.
+    fn flush_images(
+        &self,
+        paths: &[PathBuf],
+        moves: &std::collections::BTreeMap<PathBuf, PathBuf>,
+    ) -> std::io::Result<Vec<PublicationEntry>> {
         let mut entries = Vec::with_capacity(paths.len());
         let mut directories = std::collections::BTreeSet::new();
         for path in paths {
@@ -579,6 +634,20 @@ impl Publication {
         for directory in directories.iter().rev() {
             sync_dir(directory)?;
         }
+        Ok(entries)
+    }
+
+    /// Missing staged files mean deletion. Paths are relative to root, and
+    /// are the names the files are published under.
+    pub fn commit(&self, paths: &[std::path::PathBuf]) -> std::io::Result<()> {
+        self.commit_with_progress(paths, &mut unobserved)
+    }
+
+    fn commit_with_progress(&self, paths: &[PathBuf], published: &mut dyn FnMut(usize, usize)) -> std::io::Result<()> {
+        self.check_root()?;
+        validate_paths(paths)?;
+        let moves = Self::moves(self.stage.path())?;
+        let entries = charge(|| self.flush_images(paths, &moves), |cost, spent| cost.staged_images += spent)?;
         write(
             &self.stage.path().join("publication.json"),
             &serde_json::to_vec(&entries)?,
@@ -588,7 +657,7 @@ impl Publication {
         // This run wrote the journal and holds the lock: nothing else can
         // have changed the device since, and a file that looks newer only
         // has a clock ahead of this one (FAT keeps local time with no zone).
-        Self::finish(&self.root, &self.journal, false)
+        Self::finish(&self.root, &self.journal, false, published)
     }
 
     pub fn recover(root: &Path, name: &str) -> std::io::Result<()> {
@@ -596,7 +665,7 @@ impl Publication {
         if journal.try_exists()? {
             let _lock = lock(root)?;
             if journal.try_exists()? {
-                Self::finish(root, &journal, true)?;
+                Self::finish(root, &journal, true, &mut unobserved)?;
             }
         }
         Ok(())
@@ -694,7 +763,7 @@ impl Publication {
                 .map(|(entry, _)| PublicationEntry { path: entry.path.clone(), present: entry.present, had_target: entry.had_target, exact: true })
                 .collect();
             write(&record, &serde_json::to_vec(&rest)?)?;
-            Self::finish(root, &journal, false)?;
+            Self::finish(root, &journal, false, &mut unobserved)?;
         } else {
             for (entry, theirs) in entries.iter().zip(&theirs).rev() {
                 if *theirs {
@@ -727,7 +796,7 @@ impl Publication {
     #[allow(clippy::too_many_lines, reason = "one ordered roll-forward over the journal")]
     /// `replay`: the journal was left by a run that stopped, so the device
     /// may have been written to since; see [`check_external_changes`].
-    fn finish(root: &Path, journal: &Path, replay: bool) -> std::io::Result<()> {
+    fn finish(root: &Path, journal: &Path, replay: bool, published: &mut dyn FnMut(usize, usize)) -> std::io::Result<()> {
         if journal.join(".rollback").try_exists()? { return Self::rollback_at(root, journal); }
         let record = journal.join("publication.json");
         let entries: Vec<PublicationEntry> = serde_json::from_slice(
@@ -873,7 +942,7 @@ impl Publication {
             }
             Ok(())
         };
-        for entry in &entries {
+        let publish_named = |entry: &PublicationEntry| {
             publish(entry).map_err(|error| {
                 // Every failure names the file it was publishing.
                 if error.to_string().contains(&*entry.path.to_string_lossy()) {
@@ -881,8 +950,17 @@ impl Publication {
                 } else {
                     std::io::Error::new(error.kind(), format!("Could not publish {}: {error}", entry.path.display()))
                 }
-            })?;
-        }
+            })
+        };
+        let total = entries.len();
+        let publish_all = || {
+            entries.iter().enumerate().try_for_each(|(index, entry)| {
+                publish_named(entry)?;
+                published(index + 1, total);
+                Ok::<_, std::io::Error>(())
+            })
+        };
+        charge(publish_all, |cost, spent| cost.publishing += spent)?;
         if journal.join(".verification-required").try_exists()? { return Ok(()); }
         Self::retire(root, journal)
     }
@@ -901,7 +979,7 @@ impl Publication {
         }
         // `TempDir`'s own cleanup cannot delete names exFAT lists in another
         // form; whatever this leaves, the next publication clears.
-        let _ = remove_tree(discarded.path());
+        let _ = charge(|| remove_tree(discarded.path()), |cost, spent| cost.retiring += spent);
         Ok(())
     }
 }
@@ -1853,6 +1931,37 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(left.iter().all(|n| n == "PIONEER" || n == ".rbxport-write.lock"), "{left:?}");
+    }
+
+    #[test]
+    fn a_commit_flushes_every_staged_image_and_its_record() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = Publication::new(root.path(), ".journal").unwrap();
+        let images = ["Contents/a.mp3", "Contents/b.mp3", "PIONEER/rekordbox/export.pdb"];
+        for image in images {
+            write_file(&publication.stage().join(image), b"bytes");
+        }
+        reset_flush_cost();
+        publication.commit(&images.map(PathBuf::from)).unwrap();
+        let cost = flush_cost();
+        let publication_record = 1;
+        assert_eq!(cost.file_flushes, images.len() as u64 + publication_record);
+        assert!(cost.directory_flushes > 0);
+    }
+
+    #[test]
+    fn a_retained_commit_reports_each_file_it_puts_in_place() {
+        let root = tempfile::tempdir().unwrap();
+        let publication = Publication::new(root.path(), ".journal").unwrap();
+        let images = ["Contents/a.mp3", "Contents/b.mp3", "PIONEER/rekordbox/export.pdb"];
+        for image in images {
+            write_file(&publication.stage().join(image), b"bytes");
+        }
+        let mut reported = Vec::new();
+        publication
+            .commit_retained_with_progress(&images.map(PathBuf::from), &mut |done, total| reported.push((done, total)))
+            .unwrap();
+        assert_eq!(reported, [(1, 3), (2, 3), (3, 3)]);
     }
 
     #[test]
