@@ -146,7 +146,7 @@ impl Error {
 
 /// Inspect device and source state without recovery, staging, or writes.
 pub fn inspect(destination: &Path, source: &Source, options: &Options) -> Result<rb_model::conflict::Inspection> {
-    let (tracks, playlists, tags, sync) = prepare::prepare(source)?;
+    let prepare::Prepared { tracks, playlists, tags, sync } = prepare::prepare(source)?;
     let settings = collect_settings(destination, options.settings_dir.as_deref())?;
     Ok(rbl_export::review::inspect_volume(
         destination,
@@ -183,7 +183,7 @@ pub fn export(
     progress: &mut dyn FnMut(&Progress),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Report> {
-    let (tracks, playlists, tags, sync) = prepare::prepare(source)?;
+    let prepare::Prepared { tracks, playlists, tags, sync } = prepare::prepare(source)?;
     if cancelled() {
         return Err(Error::Cancelled);
     }

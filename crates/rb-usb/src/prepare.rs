@@ -61,9 +61,14 @@ fn analysis_bytes(paths: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, Error> {
     Ok(files)
 }
 
-pub(crate) fn prepare(
-    job: &Source,
-) -> Result<(Vec<SourceTrack>, Vec<SourcePlaylist>, Vec<SourceMyTag>, SyncSource), Error> {
+pub(crate) struct Prepared {
+    pub tracks: Vec<SourceTrack>,
+    pub playlists: Vec<SourcePlaylist>,
+    pub tags: Vec<SourceMyTag>,
+    pub sync: SyncSource,
+}
+
+pub(crate) fn prepare(job: &Source) -> Result<Prepared, Error> {
     let mut tracks = Vec::with_capacity(job.tracks.len());
     let mut index_of: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
     for track in &job.tracks {
@@ -159,5 +164,5 @@ pub(crate) fn prepare(
             })
             .collect(),
     };
-    Ok((tracks, playlists, tags, sync))
+    Ok(Prepared { tracks, playlists, tags, sync })
 }

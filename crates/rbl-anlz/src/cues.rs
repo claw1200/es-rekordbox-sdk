@@ -34,6 +34,7 @@ fn put16(b: &mut [u8], at: usize, n: u16) {
 }
 
 /// DAT carries memory and A-C; EXT adds D-P and the complete extended lists.
+#[allow(clippy::too_many_lines)]
 pub fn sections(cues: &[ExportCue], extended: bool) -> Vec<Section> {
     let ordered: Vec<_> = cues.iter().collect();
     let mut out = Vec::new();
