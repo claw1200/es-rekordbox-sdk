@@ -51,7 +51,8 @@ pub(super) fn is_interface_id(instance_id: &str) -> bool {
 /// A root hub (`USB\ROOT_HUB…`), a device with the hub class among its compatible ids
 /// (`USB\Class_09…`), or one run by a hub driver (`usbhub`, `USBHUB3`).
 pub(super) fn is_hub<'a>(instance_id: &str, mut compatible_ids: impl Iterator<Item = &'a str>, service: &str) -> bool {
-    let starts = |text: &str, prefix: &str| text.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix));
+    let starts =
+        |text: &str, prefix: &str| text.get(..prefix.len()).is_some_and(|head| head.eq_ignore_ascii_case(prefix));
     starts(instance_id, "USB\\ROOT_HUB")
         || compatible_ids.any(|id| starts(id, "USB\\Class_09"))
         || service.eq_ignore_ascii_case("usbhub")
@@ -196,7 +197,8 @@ mod tests {
         let thunderbolt = [(1, Some(2), FIXED), (2, Some(3), FIXED), (3, Some(4), HUB), (4, None, REMOVABLE)];
         assert_eq!(target(&thunderbolt, 1, false), Refuse);
         assert_eq!(target(&thunderbolt, 1, true), Media);
-        let through_interface = [(1, Some(2), FIXED), (2, Some(3), INTERFACE), (3, Some(4), FIXED), (4, None, REMOVABLE)];
+        let through_interface =
+            [(1, Some(2), FIXED), (2, Some(3), INTERFACE), (3, Some(4), FIXED), (4, None, REMOVABLE)];
         assert_eq!(target(&through_interface, 1, true), Media);
         let removable_disk = [(1, Some(2), REMOVABLE), (2, Some(3), FIXED), (3, None, FIXED)];
         assert_eq!(target(&removable_disk, 1, false), Device(1));

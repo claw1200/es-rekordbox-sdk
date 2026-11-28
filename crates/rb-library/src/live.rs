@@ -10,5 +10,4 @@ pub const MEMBERS_FROM: &str = "djmdSongPlaylist sp \
      JOIN djmdContent c ON c.ID = sp.ContentID \
      JOIN djmdPlaylist p ON p.ID = sp.PlaylistID";
 
-pub const MEMBERS_WHERE: &str =
-    "sp.rb_local_deleted = 0 AND c.rb_local_deleted = 0 AND p.rb_local_deleted = 0";
+pub const MEMBERS_WHERE: &str = "sp.rb_local_deleted = 0 AND c.rb_local_deleted = 0 AND p.rb_local_deleted = 0";

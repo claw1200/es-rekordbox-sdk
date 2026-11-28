@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-pub mod source;
 pub mod conflict;
+pub mod source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -14,8 +14,11 @@ fn has_database(root: &Path) -> bool {
 /// The device root and the spelling of its name that the stick already uses.
 #[must_use]
 pub fn pioneer_dir(volume: &Path) -> (PathBuf, &'static str) {
-    let found: Vec<(PathBuf, &'static str)> =
-        ROOT_NAMES.iter().map(|name| (volume.join(name), *name)).filter(|(root, _)| has_database(root) || root.is_dir()).collect();
+    let found: Vec<(PathBuf, &'static str)> = ROOT_NAMES
+        .iter()
+        .map(|name| (volume.join(name), *name))
+        .filter(|(root, _)| has_database(root) || root.is_dir())
+        .collect();
     if let Some(with_db) = found.iter().find(|(root, _)| has_database(root)) {
         return with_db.clone();
     }

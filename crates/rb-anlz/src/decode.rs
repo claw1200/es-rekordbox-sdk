@@ -103,7 +103,8 @@ pub struct Bands {
 pub fn bands(tags: &Tags, kind: &str) -> Option<Bands> {
     let (body, count) = tags.entries(kind)?;
     let count = count.min(body.len() / 3);
-    let bands = body[..count * 3].iter().map(|&b| (f32::from(b) * 2.0).round_ties_even().clamp(0.0, 255.0) as u8).collect();
+    let bands =
+        body[..count * 3].iter().map(|&b| (f32::from(b) * 2.0).round_ties_even().clamp(0.0, 255.0) as u8).collect();
     Some(Bands { length: count, bands })
 }
 
@@ -224,10 +225,15 @@ pub fn hot_cue_colors(ext: &Tags) -> HashMap<(u32, u32), HotCueColor> {
     extended_cues(ext)
         .into_iter()
         .filter(|cue| cue.slot != 0)
-        .map(|cue| ((cue.slot, cue.start_ms), HotCueColor {
-            code: cue.color_code,
-            rgb: format!("#{:02x}{:02x}{:02x}", cue.rgb[0], cue.rgb[1], cue.rgb[2]),
-        }))
+        .map(|cue| {
+            (
+                (cue.slot, cue.start_ms),
+                HotCueColor {
+                    code: cue.color_code,
+                    rgb: format!("#{:02x}{:02x}{:02x}", cue.rgb[0], cue.rgb[1], cue.rgb[2]),
+                },
+            )
+        })
         .collect()
 }
 
@@ -318,7 +324,11 @@ mod tests {
         header.extend(1u16.to_be_bytes());
         header.extend(0u16.to_be_bytes());
         header.extend(0u32.to_be_bytes());
-        let ext = file(&[tag("PCO2", &[header[..4].to_vec(), 1u16.to_be_bytes().to_vec(), 0u16.to_be_bytes().to_vec()].concat(), &entry)]);
+        let ext = file(&[tag(
+            "PCO2",
+            &[header[..4].to_vec(), 1u16.to_be_bytes().to_vec(), 0u16.to_be_bytes().to_vec()].concat(),
+            &entry,
+        )]);
         assert_eq!(hot_cue_colors(&ext).get(&(2, 1500)), Some(&HotCueColor { code: Some(46), rgb: "#102030".into() }));
         let cue = &extended_cues(&ext)[0];
         assert_eq!(cue.color_id, 0);
@@ -391,7 +401,11 @@ fn colour_rows(ext: &Tags) -> Option<(Vec<u8>, Vec<u8>)> {
     for &b in &body[..count] {
         heights.push(scale(u32::from(b & 31), 31));
         let white = f32::from((b >> 5) & 7) / 7.0;
-        colors.extend([(40.0 + 180.0 * white).round_ties_even() as u8, (110.0 + 130.0 * white).round_ties_even() as u8, 255]);
+        colors.extend([
+            (40.0 + 180.0 * white).round_ties_even() as u8,
+            (110.0 + 130.0 * white).round_ties_even() as u8,
+            255,
+        ]);
     }
     Some((heights, colors))
 }

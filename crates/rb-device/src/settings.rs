@@ -70,8 +70,7 @@ impl Default for DevSetting {
             file[offset..offset + text.len()].copy_from_slice(text.as_bytes());
         }
         file[0x64..BODY_AT].copy_from_slice(&32_u32.to_le_bytes());
-        file[BODY_AT..BODY_AT + 14]
-            .copy_from_slice(&[0x78, 0x56, 0x34, 0x12, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
+        file[BODY_AT..BODY_AT + 14].copy_from_slice(&[0x78, 0x56, 0x34, 0x12, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1]);
         let checksum = crc16(&file[BODY_AT..CHECKSUM_AT]);
         file[CHECKSUM_AT..CHECKSUM_AT + 2].copy_from_slice(&checksum.to_le_bytes());
         Self {
@@ -89,11 +88,7 @@ fn crc16(bytes: &[u8]) -> u16 {
     for byte in bytes {
         crc ^= u16::from(*byte) << 8;
         for _ in 0..8 {
-            crc = if crc & 0x8000 == 0 {
-                crc << 1
-            } else {
-                (crc << 1) ^ 0x1021
-            };
+            crc = if crc & 0x8000 == 0 { crc << 1 } else { (crc << 1) ^ 0x1021 };
         }
     }
     crc
@@ -107,18 +102,11 @@ trait DisplayByte: Copy + PartialEq + Sized + 'static {
     const CODES: &'static [(u8, Self)];
 
     fn decode(byte: u8) -> Option<Self> {
-        Self::CODES
-            .iter()
-            .find(|(code, _)| *code == byte)
-            .map(|(_, value)| *value)
+        Self::CODES.iter().find(|(code, _)| *code == byte).map(|(_, value)| *value)
     }
 
     fn code(self) -> u8 {
-        Self::CODES
-            .iter()
-            .find(|(_, value)| *value == self)
-            .map(|(code, _)| *code)
-            .expect("every value has a code")
+        Self::CODES.iter().find(|(_, value)| *value == self).map(|(code, _)| *code).expect("every value has a code")
     }
 
     fn read(file: &[u8; 140]) -> Option<Self> {
@@ -144,20 +132,13 @@ impl DisplayByte for WaveformColor {
 
 impl DisplayByte for KeyDisplay {
     const AT: usize = BODY_AT + 12;
-    const CODES: &'static [(u8, Self)] = &[
-        (1, Self::Classic),
-        (2, Self::Alphanumeric),
-        (UNSET_BY_OLDER_PLAYERS, Self::Classic),
-    ];
+    const CODES: &'static [(u8, Self)] =
+        &[(1, Self::Classic), (2, Self::Alphanumeric), (UNSET_BY_OLDER_PLAYERS, Self::Classic)];
 }
 
 impl DisplayByte for WaveformPosition {
     const AT: usize = BODY_AT + 13;
-    const CODES: &'static [(u8, Self)] = &[
-        (1, Self::Center),
-        (2, Self::Left),
-        (UNSET_BY_OLDER_PLAYERS, Self::Center),
-    ];
+    const CODES: &'static [(u8, Self)] = &[(1, Self::Center), (2, Self::Left), (UNSET_BY_OLDER_PLAYERS, Self::Center)];
 }
 
 impl DevSetting {
@@ -220,9 +201,7 @@ fn require_recovered(mount_point: &Path) -> Result<(), SettingsError> {
         return Err(SettingsError::Invalid("Device is not mounted".into()));
     }
     if mount_point.join(JOURNAL).try_exists()? {
-        return Err(SettingsError::Invalid(
-            "Device recovery is required before accessing settings".into(),
-        ));
+        return Err(SettingsError::Invalid("Device recovery is required before accessing settings".into()));
     }
     Ok(())
 }
@@ -263,10 +242,7 @@ fn read_files(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
     ] {
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(SettingsError::Invalid(format!(
-                    "Settings path is a symbolic link: {}",
-                    path.display()
-                )));
+                return Err(SettingsError::Invalid(format!("Settings path is a symbolic link: {}", path.display())));
             }
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {}
@@ -274,38 +250,26 @@ fn read_files(mount_point: &Path) -> Result<DeviceSettings, SettingsError> {
     }
     let dev = match std::fs::read(root.join("DEVSETTING.DAT")) {
         Ok(bytes) => Some(DevSetting::parse(&bytes).ok_or_else(|| {
-            SettingsError::Invalid(
-                "Unsupported or damaged DEVSETTING.DAT; it has not been changed".into(),
-            )
+            SettingsError::Invalid("Unsupported or damaged DEVSETTING.DAT; it has not been changed".into())
         })?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
     let library_path = root.join("rekordbox/exportLibrary.db");
     let has_one_library = library_path.try_exists()?;
-    let library = if has_one_library {
-        Some(StickSettings::read_strict(&library_path)?)
-    } else {
-        None
-    };
+    let library = if has_one_library { Some(StickSettings::read_strict(&library_path)?) } else { None };
     let pdb_path = root.join("rekordbox/export.pdb");
     let has_device_library = pdb_path.try_exists()?;
     let device_library_background = if has_device_library {
         let bytes = std::fs::read(pdb_path)?;
-        let pdb = rbl_pdb::Pdb::parse_strict(&bytes)
-            .map_err(|error| SettingsError::Invalid(error.to_string()))?;
-        pdb.property_strict().map_err(|error| SettingsError::Invalid(error.to_string()))?
+        let pdb = rbl_pdb::Pdb::parse_strict(&bytes).map_err(|error| SettingsError::Invalid(error.to_string()))?;
+        pdb.property_strict()
+            .map_err(|error| SettingsError::Invalid(error.to_string()))?
             .map(|property| property.background_color)
     } else {
         None
     };
-    Ok(DeviceSettings {
-        dev,
-        library,
-        device_library_background,
-        has_device_library,
-        has_one_library,
-    })
+    Ok(DeviceSettings { dev, library, device_library_background, has_device_library, has_one_library })
 }
 
 /// Updates only changed groups. Does not create either device library.
@@ -332,9 +296,7 @@ fn write_inner(
     require_recovered(mount_point)?;
     let current = read_files(mount_point)?;
     if expected.is_some_and(|expected| *expected != current) {
-        return Err(SettingsError::Invalid(
-            "Device settings changed; reload them before saving".into(),
-        ));
+        return Err(SettingsError::Invalid("Device settings changed; reload them before saving".into()));
     }
     let dev_changed = settings.dev.is_some() && settings.dev != current.dev;
     let library_changed = settings.library.is_some() && settings.library != current.library;
@@ -343,22 +305,13 @@ fn write_inner(
     if !dev_changed && !library_changed && !background_changed {
         return Ok(());
     }
-    if settings
-        .device_library_background
-        .is_some_and(|color| color > 8)
-        || settings
-            .library
-            .as_ref()
-            .is_some_and(|library| !(0..=8).contains(&library.background_color_type))
+    if settings.device_library_background.is_some_and(|color| color > 8)
+        || settings.library.as_ref().is_some_and(|library| !(0..=8).contains(&library.background_color_type))
     {
-        return Err(SettingsError::Invalid(
-            "Background color must be between 0 and 8".into(),
-        ));
+        return Err(SettingsError::Invalid("Background color must be between 0 and 8".into()));
     }
     let root = export_root(mount_point);
-    let relative = root
-        .strip_prefix(mount_point)
-        .map_err(std::io::Error::other)?;
+    let relative = root.strip_prefix(mount_point).map_err(std::io::Error::other)?;
     let staged_root = publication.stage().join(relative);
     durable::create_dir_all(staged_root.join("rekordbox"))?;
     let mut files = Vec::new();
@@ -370,9 +323,7 @@ fn write_inner(
     }
     if library_changed {
         if !current.has_one_library {
-            return Err(SettingsError::Invalid(
-                "Browse settings require an existing OneLibrary".into(),
-            ));
+            return Err(SettingsError::Invalid("Browse settings require an existing OneLibrary".into()));
         }
         if let Some(library) = &settings.library {
             let staged = staged_root.join("rekordbox/exportLibrary.db");
@@ -394,11 +345,7 @@ fn write_inner(
             let bytes = std::fs::read(root.join("rekordbox/export.pdb"))?;
             let next = updated_pdb(
                 &bytes,
-                if library_changed {
-                    settings.library.as_ref()
-                } else {
-                    None
-                },
+                if library_changed { settings.library.as_ref() } else { None },
                 settings.device_library_background,
             )?;
             if next != bytes {
@@ -406,9 +353,7 @@ fn write_inner(
                 files.push(relative.join("rekordbox/export.pdb"));
             }
         } else if background_changed {
-            return Err(SettingsError::Invalid(
-                "Device Library background requires an existing export.pdb".into(),
-            ));
+            return Err(SettingsError::Invalid("Device Library background requires an existing export.pdb".into()));
         }
     }
     publication.commit(&files)?;
@@ -426,14 +371,12 @@ fn updated_pdb(
             .colors
             .iter()
             .map(|color| {
-                let id = u16::try_from(color.id)
-                    .map_err(|_| SettingsError::Invalid("Invalid color id".into()))?;
+                let id = u16::try_from(color.id).map_err(|_| SettingsError::Invalid("Invalid color id".into()))?;
                 Ok(rbl_pdb::rows::color_row(id, &color.name))
             })
             .collect::<Result<_, SettingsError>>()?;
-        next = rbl_pdb::build::replace_single_page_table(&next, 6, &rows).ok_or_else(|| {
-            SettingsError::Invalid("Cannot update export.pdb color labels".into())
-        })?;
+        next = rbl_pdb::build::replace_single_page_table(&next, 6, &rows)
+            .ok_or_else(|| SettingsError::Invalid("Cannot update export.pdb color labels".into()))?;
         // A player that reads only export.pdb takes its Category, Sort and Column settings from here. A stick
         // written without these tables keeps them as they are, as rbl-devices does.
         let (categories, sorts) = rbl_export::menu_rows(library);
@@ -443,8 +386,7 @@ fn updated_pdb(
             }
         }
     }
-    let pdb =
-        rbl_pdb::Pdb::parse_strict(&next).map_err(|error| SettingsError::Invalid(error.to_string()))?;
+    let pdb = rbl_pdb::Pdb::parse_strict(&next).map_err(|error| SettingsError::Invalid(error.to_string()))?;
     if let Some(current) = pdb.property_strict().map_err(|error| SettingsError::Invalid(error.to_string()))? {
         let mut property = current.clone();
         if let Some(library) = library {
@@ -456,15 +398,11 @@ fn updated_pdb(
         if property != current {
             let row = rbl_pdb::rows::property_row(&property)
                 .ok_or_else(|| SettingsError::Invalid("Invalid Device Library property".into()))?;
-            next =
-                rbl_pdb::build::replace_single_page_table(&next, 19, &[row]).ok_or_else(|| {
-                    SettingsError::Invalid("Cannot update Device Library property".into())
-                })?;
+            next = rbl_pdb::build::replace_single_page_table(&next, 19, &[row])
+                .ok_or_else(|| SettingsError::Invalid("Cannot update Device Library property".into()))?;
         }
     } else if background.is_some() || library.is_some() {
-        return Err(SettingsError::Invalid(
-            "Device Library has no readable property row".into(),
-        ));
+        return Err(SettingsError::Invalid("Device Library has no readable property row".into()));
     }
     Ok(next)
 }
@@ -559,7 +497,8 @@ mod tests {
                     }
                 }
                 Ok(before)
-            }).unwrap();
+            })
+            .unwrap();
             assert_eq!(calls, 2);
             assert_eq!(snapshot.dev.unwrap().color, WaveformColor::Rgb);
         }
@@ -571,15 +510,13 @@ mod tests {
     #[test]
     fn captured_rekordbox_display_file_round_trips() {
         let bytes: [u8; 140] = [
-            0x60, 0x00, 0x00, 0x00, 0x50, 0x49, 0x4f, 0x4e, 0x45, 0x45, 0x52, 0x20, 0x44, 0x4a,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x72, 0x65, 0x6b, 0x6f, 0x72, 0x64,
-            0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x37, 0x2e,
-            0x32, 0x2e, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00,
-            0x01, 0x01, 0x04, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x60, 0x00, 0x00, 0x00, 0x50, 0x49, 0x4f, 0x4e, 0x45, 0x45, 0x52, 0x20, 0x44, 0x4a, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x72, 0x65, 0x6b, 0x6f, 0x72, 0x64, 0x62, 0x6f, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x37, 0x2e, 0x32, 0x2e,
+            0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12,
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x04, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8f, 0x1a, 0x00, 0x00,
         ];
         let display = DevSetting::parse(&bytes).unwrap();
@@ -590,15 +527,13 @@ mod tests {
     #[test]
     fn captured_cdj_2000nxs2_display_file_reads_unset_fields_as_defaults_and_keeps_them() {
         let bytes: [u8; 140] = [
-            0x60, 0x00, 0x00, 0x00, 0x50, 0x49, 0x4f, 0x4e, 0x45, 0x45, 0x52, 0x20, 0x44, 0x4a,
-            0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
-            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x43, 0x44, 0x4a, 0x2d, 0x32, 0x30,
-            0x30, 0x30, 0x4e, 0x58, 0x53, 0x32, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
-            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x31, 0x2e,
-            0x38, 0x35, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
-            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
-            0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x01, 0x00, 0x00, 0x00,
-            0x01, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x60, 0x00, 0x00, 0x00, 0x50, 0x49, 0x4f, 0x4e, 0x45, 0x45, 0x52, 0x20, 0x44, 0x4a, 0x00, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x43, 0x44, 0x4a, 0x2d, 0x32, 0x30, 0x30, 0x30, 0x4e, 0x58, 0x53, 0x32, 0x00, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x31, 0x2e, 0x38, 0x35,
+            0x00, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+            0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12,
+            0x01, 0x00, 0x00, 0x00, 0x01, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0xe0, 0x00, 0x00,
         ];
         let mut display = DevSetting::parse(&bytes).unwrap();
@@ -624,13 +559,9 @@ mod tests {
         assert_eq!(parsed.encode(), bytes);
         parsed.key_display = KeyDisplay::Alphanumeric;
         let next = parsed.encode();
-        let differences: Vec<_> = (0..140)
-            .filter(|index| bytes[*index] != next[*index])
-            .collect();
+        let differences: Vec<_> = (0..140).filter(|index| bytes[*index] != next[*index]).collect();
         assert!(differences.contains(&(BODY_AT + 12)));
-        assert!(differences
-            .iter()
-            .all(|index| [BODY_AT + 12, 0x88, 0x89].contains(index)));
+        assert!(differences.iter().all(|index| [BODY_AT + 12, 0x88, 0x89].contains(index)));
         let mut damaged = bytes;
         damaged[110] ^= 1;
         assert!(DevSetting::parse(&damaged).is_none());
@@ -641,10 +572,7 @@ mod tests {
         let volume = tempfile::tempdir().unwrap();
         let current = read(volume.path()).unwrap();
         let mut edited = current.clone();
-        edited.dev = Some(DevSetting {
-            color: WaveformColor::Rgb,
-            ..Default::default()
-        });
+        edited.dev = Some(DevSetting { color: WaveformColor::Rgb, ..Default::default() });
         write_changes(volume.path(), &current, &edited).unwrap();
         assert_eq!(read(volume.path()).unwrap(), edited);
 
@@ -674,10 +602,7 @@ mod tests {
         next.dev = Some(DevSetting::default());
         write_changes(volume.path(), &current, &next).unwrap();
         assert_eq!(read(volume.path()).unwrap().dev, next.dev);
-        assert!(!volume
-            .path()
-            .join("PIONEER/rekordbox/exportLibrary.db")
-            .exists());
+        assert!(!volume.path().join("PIONEER/rekordbox/exportLibrary.db").exists());
         assert!(write_changes(volume.path(), &current, &next).is_err());
     }
 
@@ -700,18 +625,12 @@ mod tests {
         let library = saved.library.as_ref().unwrap();
         assert_eq!(library.device_name, "FRIDAY");
         assert_eq!(library.background_color_type, 8);
-        assert_eq!(
-            library.sub_column,
-            next.library.as_ref().unwrap().sub_column
-        );
+        assert_eq!(library.sub_column, next.library.as_ref().unwrap().sub_column);
         assert_eq!(
             library.categories,
             rbl_onelibrary::settings::renumbered(&next.library.as_ref().unwrap().categories)
         );
-        assert_eq!(
-            library.sorts,
-            rbl_onelibrary::settings::renumbered(&next.library.as_ref().unwrap().sorts)
-        );
+        assert_eq!(library.sorts, rbl_onelibrary::settings::renumbered(&next.library.as_ref().unwrap().sorts));
         assert_eq!(library.colors[0].name, "Favorites");
         assert_eq!(saved.device_library_background, Some(4));
         let root = export_root(volume.path());
@@ -720,19 +639,10 @@ mod tests {
         assert_eq!(property.device_name, "FRIDAY");
         let db = std::fs::read(root.join("rekordbox/exportLibrary.db")).unwrap();
         let mut display = saved.clone();
-        display.dev = Some(DevSetting {
-            color: WaveformColor::TriBand,
-            ..Default::default()
-        });
+        display.dev = Some(DevSetting { color: WaveformColor::TriBand, ..Default::default() });
         write_changes(volume.path(), &saved, &display).unwrap();
-        assert_eq!(
-            std::fs::read(root.join("rekordbox/exportLibrary.db")).unwrap(),
-            db
-        );
-        assert_eq!(
-            std::fs::read(root.join("rekordbox/export.pdb")).unwrap(),
-            pdb
-        );
+        assert_eq!(std::fs::read(root.join("rekordbox/exportLibrary.db")).unwrap(), db);
+        assert_eq!(std::fs::read(root.join("rekordbox/export.pdb")).unwrap(), pdb);
     }
 
     #[test]
@@ -759,7 +669,10 @@ mod tests {
         let categories = rows(rbl_pdb::PageType::Categories);
         let sorts = rows(rbl_pdb::PageType::Sorts);
         assert!(categories.contains(&vec![0x05, 0x00, 0x06, 0x00, 0x05, 0x00, 0x0b, 0x00]), "BPM shown eleventh");
-        assert!(sorts.contains(&vec![0x05, 0x00, 0x04, 0x00, 0x02, 0x05, 0x00, 0x00]), "BPM the column beside the title");
+        assert!(
+            sorts.contains(&vec![0x05, 0x00, 0x04, 0x00, 0x02, 0x05, 0x00, 0x00]),
+            "BPM the column beside the title"
+        );
         assert!(sorts.contains(&vec![0x15, 0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x00]), "COMMENTS no longer the column");
     }
 
@@ -778,10 +691,7 @@ mod tests {
         assert!(write(volume.path(), &next).is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"damaged");
         std::fs::create_dir(volume.path().join(".exportstudio-publication")).unwrap();
-        assert!(read(volume.path())
-            .unwrap_err()
-            .to_string()
-            .contains("recovery"));
+        assert!(read(volume.path()).unwrap_err().to_string().contains("recovery"));
         assert!(write(volume.path(), &next).is_err());
     }
 
@@ -803,14 +713,7 @@ mod tests {
         std::os::unix::fs::symlink(elsewhere.path(), volume.path().join("PIONEER")).unwrap();
         assert!(read(volume.path()).is_err());
         let current = read(elsewhere.path()).unwrap();
-        assert!(write(
-            volume.path(),
-            &DeviceSettings {
-                dev: Some(DevSetting::default()),
-                ..current
-            }
-        )
-        .is_err());
+        assert!(write(volume.path(), &DeviceSettings { dev: Some(DevSetting::default()), ..current }).is_err());
         assert!(!elsewhere.path().join("DEVSETTING.DAT").exists());
     }
 }

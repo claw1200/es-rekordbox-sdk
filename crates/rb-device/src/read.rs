@@ -62,7 +62,11 @@ fn names(conn: &Connection, table: &str, id: &str) -> rusqlite::Result<HashMap<i
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))?;
-    let found = stmt.query_map([], |row| row.get::<_, String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|c| c == column);
+    let found = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|c| c == column);
     Ok(found)
 }
 
@@ -73,7 +77,8 @@ fn from_onelibrary(conn: &Connection, root_name: &str) -> rusqlite::Result<Devic
     let labels = names(conn, "label", "label_id")?;
     let keys = names(conn, "key", "key_id")?;
     let mut stmt = conn.prepare("SELECT image_id, path FROM image")?;
-    let images = stmt.query_map([], |row| Ok((number(row, "image_id")?, text(row, "path")?)))?
+    let images = stmt
+        .query_map([], |row| Ok((number(row, "image_id")?, text(row, "path")?)))?
         .collect::<rusqlite::Result<HashMap<i64, String>>>()?;
 
     let mut cues: HashMap<i64, Vec<Cue>> = HashMap::new();
@@ -144,7 +149,8 @@ fn from_onelibrary(conn: &Connection, root_name: &str) -> rusqlite::Result<Devic
     }
 
     let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT playlist_id, content_id FROM playlist_content ORDER BY playlist_id, sequenceNo")?;
+    let mut stmt =
+        conn.prepare("SELECT playlist_id, content_id FROM playlist_content ORDER BY playlist_id, sequenceNo")?;
     for row in stmt.query_map([], |row| Ok((number(row, "playlist_id")?, number(row, "content_id")?)))? {
         let (playlist, content) = row?;
         members.entry(playlist).or_default().push(content);
@@ -166,7 +172,8 @@ fn from_onelibrary(conn: &Connection, root_name: &str) -> rusqlite::Result<Devic
     }
 
     let mut played: HashMap<i64, Vec<i64>> = HashMap::new();
-    let mut stmt = conn.prepare("SELECT history_id, content_id FROM history_content ORDER BY history_id, sequenceNo")?;
+    let mut stmt =
+        conn.prepare("SELECT history_id, content_id FROM history_content ORDER BY history_id, sequenceNo")?;
     for row in stmt.query_map([], |row| Ok((number(row, "history_id")?, number(row, "content_id")?)))? {
         let (history, content) = row?;
         played.entry(history).or_default().push(content);
@@ -190,7 +197,14 @@ fn from_onelibrary(conn: &Connection, root_name: &str) -> rusqlite::Result<Devic
     let device_name = conn
         .query_row("SELECT deviceName FROM property LIMIT 1", [], |row| text(row, "deviceName"))
         .unwrap_or_default();
-    Ok(Device { kind: LibraryKind::OneLibrary, root_name: root_name.to_owned(), device_name, tracks, playlists, histories })
+    Ok(Device {
+        kind: LibraryKind::OneLibrary,
+        root_name: root_name.to_owned(),
+        device_name,
+        tracks,
+        playlists,
+        histories,
+    })
 }
 
 /// rekordbox's file type code from an extension.
@@ -210,8 +224,13 @@ fn from_pdb(bytes: &[u8], root_name: &str) -> Result<Device> {
     let named = |kind: PageType| -> HashMap<u32, String> {
         pdb.table(kind).map(|t| pdb.named_rows(t).into_iter().map(|r| (r.id, r.name)).collect()).unwrap_or_default()
     };
-    let (artists, albums, genres, labels, keys) =
-        (named(PageType::Artists), named(PageType::Albums), named(PageType::Genres), named(PageType::Labels), named(PageType::Keys));
+    let (artists, albums, genres, labels, keys) = (
+        named(PageType::Artists),
+        named(PageType::Albums),
+        named(PageType::Genres),
+        named(PageType::Labels),
+        named(PageType::Keys),
+    );
     let images = named(PageType::Artwork);
     let pick = |map: &HashMap<u32, String>, id: u32| map.get(&id).cloned().unwrap_or_default();
     let tracks = pdb
@@ -297,5 +316,12 @@ fn from_pdb(bytes: &[u8], root_name: &str) -> Result<Device> {
         })
         .collect();
     let device_name = pdb.property().map(|p| p.device_name).unwrap_or_default();
-    Ok(Device { kind: LibraryKind::DeviceLibrary, root_name: root_name.to_owned(), device_name, tracks, playlists, histories })
+    Ok(Device {
+        kind: LibraryKind::DeviceLibrary,
+        root_name: root_name.to_owned(),
+        device_name,
+        tracks,
+        playlists,
+        histories,
+    })
 }

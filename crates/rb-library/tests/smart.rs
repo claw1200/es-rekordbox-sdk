@@ -21,19 +21,29 @@ fn lib_with(xml: &str) -> (tempfile::TempDir, Library) {
 }
 
 fn cond(property: &str, operator: i64, left: &str) -> String {
-    format!(r#"<CONDITION PropertyName="{property}" Operator="{operator}" ValueUnit="" ValueLeft="{left}" ValueRight=""/>"#)
+    format!(
+        r#"<CONDITION PropertyName="{property}" Operator="{operator}" ValueUnit="" ValueLeft="{left}" ValueRight=""/>"#
+    )
 }
 
 #[test]
 fn all_conditions_must_match_and_removed_tracks_never_do() {
-    let xml = format!(r#"<NODE Id="1" LogicalOperator="1" AutomaticUpdate="0">{}{}</NODE>"#, cond("name", 8, "alpha"), cond("bpm", 3, "10000"));
+    let xml = format!(
+        r#"<NODE Id="1" LogicalOperator="1" AutomaticUpdate="0">{}{}</NODE>"#,
+        cond("name", 8, "alpha"),
+        cond("bpm", 3, "10000")
+    );
     let (_dir, lib) = lib_with(&xml);
     assert_eq!(lib.playlist_track_ids("10").unwrap(), ["1"]);
 }
 
 #[test]
 fn any_condition_may_match() {
-    let xml = format!(r#"<NODE Id="1" LogicalOperator="2" AutomaticUpdate="0">{}{}</NODE>"#, cond("name", 10, "Alpha T"), cond("rating", 1, "3"));
+    let xml = format!(
+        r#"<NODE Id="1" LogicalOperator="2" AutomaticUpdate="0">{}{}</NODE>"#,
+        cond("name", 10, "Alpha T"),
+        cond("rating", 1, "3")
+    );
     let (_dir, lib) = lib_with(&xml);
     assert_eq!(lib.playlist_track_ids("10").unwrap(), ["1", "3"]);
 }
@@ -51,7 +61,11 @@ fn text_operators_treat_like_metacharacters_literally() {
                 let xml = format!(r#"<NODE LogicalOperator="1">{}</NODE>"#, cond(property, operator, text));
                 conn.execute("UPDATE djmdPlaylist SET SmartList = ?1 WHERE ID = '10'", [&xml]).unwrap();
                 let expected = if operator == 9 { ["3"] } else { ["1"] };
-                assert_eq!(lib.playlist_track_ids("10").unwrap(), expected, "{property} operator {operator}, text {text:?}");
+                assert_eq!(
+                    lib.playlist_track_ids("10").unwrap(),
+                    expected,
+                    "{property} operator {operator}, text {text:?}"
+                );
             }
         }
     }
@@ -59,6 +73,7 @@ fn text_operators_treat_like_metacharacters_literally() {
 
 #[test]
 fn unreadable_conditions_are_an_error_not_every_track() {
-    let (_dir, lib) = lib_with(&format!(r#"<NODE Id="1" LogicalOperator="1" AutomaticUpdate="0">{}</NODE>"#, cond("bpm", 3, "fast")));
+    let (_dir, lib) =
+        lib_with(&format!(r#"<NODE Id="1" LogicalOperator="1" AutomaticUpdate="0">{}</NODE>"#, cond("bpm", 3, "fast")));
     assert!(lib.playlist_track_ids("10").is_err());
 }

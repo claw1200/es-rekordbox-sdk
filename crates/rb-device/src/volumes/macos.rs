@@ -34,7 +34,10 @@ fn disk_info(path: &Path) -> plist::Dictionary {
     let Ok(Some(out)) = run("diskutil", &["info", "-plist", &path.to_string_lossy()], DESCRIBE_LIMIT) else {
         return plist::Dictionary::new();
     };
-    plist::Value::from_reader(std::io::Cursor::new(out.stdout)).ok().and_then(plist::Value::into_dictionary).unwrap_or_default()
+    plist::Value::from_reader(std::io::Cursor::new(out.stdout))
+        .ok()
+        .and_then(plist::Value::into_dictionary)
+        .unwrap_or_default()
 }
 
 fn flag(info: &plist::Dictionary, key: &str) -> bool {
@@ -76,7 +79,9 @@ pub(super) fn mounted() -> Vec<Mounted> {
 }
 
 fn detail(output: &Output, fallback: &str) -> Error {
-    let text = String::from_utf8_lossy(if output.stderr.is_empty() { &output.stdout } else { &output.stderr }).trim().to_owned();
+    let text = String::from_utf8_lossy(if output.stderr.is_empty() { &output.stdout } else { &output.stderr })
+        .trim()
+        .to_owned();
     Error::Message(if text.is_empty() { fallback.to_owned() } else { text })
 }
 

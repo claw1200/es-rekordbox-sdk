@@ -157,7 +157,11 @@ impl Library {
     pub(crate) fn smart_track_ids(&self, playlist_id: &str) -> Result<Vec<String>> {
         let xml: Option<String> = self
             .conn()
-            .query_row("SELECT SmartList FROM djmdPlaylist WHERE ID = ?1 AND rb_local_deleted = 0", [playlist_id], |row| row.get(0))
+            .query_row(
+                "SELECT SmartList FROM djmdPlaylist WHERE ID = ?1 AND rb_local_deleted = 0",
+                [playlist_id],
+                |row| row.get(0),
+            )
             .optional()?
             .flatten();
         let Some(xml) = xml.filter(|x| !x.trim().is_empty()) else { return Ok(Vec::new()) };

@@ -36,6 +36,13 @@ node check-layers.mjs
 node check-upstream.mjs /path/to/rbxport-at-pinned-commit
 ```
 
+Format only the `rb-*` crates. The `rbl-*` sources must stay byte-identical to upstream,
+so a workspace-wide `cargo fmt` would fail the provenance check:
+
+```sh
+cargo fmt -p rb-anlz -p rb-audio -p rb-device -p rb-library -p rb-model -p rb-storage -p rb-usb
+```
+
 ## USB Safety Contract
 
 `rb_usb::inspect` is read-only and does not recover an interrupted publication.

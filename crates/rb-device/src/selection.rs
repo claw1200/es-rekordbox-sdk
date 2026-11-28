@@ -26,7 +26,9 @@ pub fn recorded_playlist_ids(volume: &Path, library_ids: &[String], db_id: u64) 
 #[must_use]
 pub fn playlist_origins(volume: &Path, db_id: u64) -> HashMap<i64, u64> {
     let (root, _) = pioneer_dir(volume);
-    let Ok(text) = std::fs::read_to_string(root.join("exportstudio").join("manifest.json")) else { return HashMap::new() };
+    let Ok(text) = std::fs::read_to_string(root.join("exportstudio").join("manifest.json")) else {
+        return HashMap::new();
+    };
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else { return HashMap::new() };
     if db_id == 0 || data.get("db_id").and_then(serde_json::Value::as_u64) != Some(db_id) {
         return HashMap::new();
@@ -39,7 +41,9 @@ pub fn playlist_origins(volume: &Path, db_id: u64) -> HashMap<i64, u64> {
 }
 
 fn manifest_ids(root: &Path) -> BTreeSet<u64> {
-    let Ok(text) = std::fs::read_to_string(root.join("exportstudio").join("manifest.json")) else { return BTreeSet::new() };
+    let Ok(text) = std::fs::read_to_string(root.join("exportstudio").join("manifest.json")) else {
+        return BTreeSet::new();
+    };
     let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else { return BTreeSet::new() };
     let Some(rows) = data.get("playlists").and_then(serde_json::Value::as_array) else { return BTreeSet::new() };
     rows.iter()

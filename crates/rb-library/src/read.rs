@@ -237,7 +237,9 @@ impl Library {
 
     /// A track's UUID, which names its analysis folder.
     pub fn track_uuid(&self, id: &str) -> Result<Option<String>> {
-        let found = self.conn().query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [id], |row| row.get::<_, Option<String>>(0));
+        let found = self
+            .conn()
+            .query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [id], |row| row.get::<_, Option<String>>(0));
         match found {
             Ok(uuid) => Ok(uuid),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -318,7 +320,9 @@ impl Library {
              WHERE sm.rb_local_deleted = 0 AND {TRACK_LIVE}{filter} ORDER BY sm.TrackNo"
         ))?;
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
-        for row in stmt.query_map(params_from_iter(params), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))? {
+        for row in
+            stmt.query_map(params_from_iter(params), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        {
             let (id, tag) = row?;
             out.entry(id).or_default().push(tag);
         }
@@ -382,7 +386,9 @@ impl Library {
             |row| row.get::<_, Option<i64>>(0),
         );
         match attribute {
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(Error::NotFound(format!("playlist {playlist_id}"))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(Error::NotFound(format!("playlist {playlist_id}")))
+            }
             Err(e) => return Err(e.into()),
             Ok(Some(FOLDER)) => return Ok(Vec::new()),
             Ok(Some(SMART)) => return self.smart_track_ids(playlist_id),

@@ -34,8 +34,7 @@ fn ids(items: &[String]) -> Vec<String> {
 
 fn counter(lib: &Library) -> i64 {
     let conn = fixture::connect(lib.path()).unwrap();
-    conn.query_row("SELECT int_1 FROM agentRegistry WHERE registry_id = 'localUpdateCount'", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT int_1 FROM agentRegistry WHERE registry_id = 'localUpdateCount'", [], |r| r.get(0)).unwrap()
 }
 
 #[test]
@@ -165,7 +164,10 @@ fn a_new_history_keeps_its_order_and_repeats_and_is_stamped() {
 
     let nodes = s.lib.histories().unwrap();
     let made = nodes.iter().find(|n| n.id == first).unwrap();
-    assert_eq!((made.name.as_str(), made.parent_id.as_str(), made.seq, made.is_folder, made.count), ("HISTORY 001", "root", 1, false, Some(3)));
+    assert_eq!(
+        (made.name.as_str(), made.parent_id.as_str(), made.seq, made.is_folder, made.count),
+        ("HISTORY 001", "root", 1, false, Some(3))
+    );
     assert!(!made.date.is_empty());
     assert_eq!(nodes.iter().find(|n| n.id == second).unwrap().seq, 2);
     assert_eq!(s.lib.history_track_ids(&first).unwrap(), plays);

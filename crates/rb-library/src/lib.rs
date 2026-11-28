@@ -3,10 +3,10 @@
 //! Reads go through a snapshot copy so rekordbox can keep running. Writes need a live handle,
 //! are refused while rekordbox runs, and all live in [`write`].
 
-mod key;
 pub mod discovery;
 pub mod export;
 pub mod fixture;
+mod key;
 pub mod live;
 pub mod read;
 mod smart;
@@ -21,7 +21,10 @@ use rusqlite::{backup::Backup, Connection, OpenFlags};
 use tempfile::TempDir;
 
 pub use read::{Cue, HistoryNode, PlaylistKind, PlaylistNode, TagNode, Track, TrackFiles};
-pub use write::{AnalysisWrite, ConversionTarget, Converted, CueMove, DeviceData, FileFacts, NewCue, NewTrack, Removed, Stream, TrackEdit, Tx};
+pub use write::{
+    AnalysisWrite, ConversionTarget, Converted, CueMove, DeviceData, FileFacts, NewCue, NewTrack, Removed, Stream,
+    TrackEdit, Tx,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -115,7 +118,8 @@ impl Library {
         let mut conn = unlock(&path)?;
         Backup::new(&source_conn, &mut conn)?.run_to_completion(128, Duration::from_millis(5), None)?;
         conn.pragma_update(None, "query_only", true)?;
-        let snapshot = Snapshot { _dir: dir, source: source.to_path_buf(), signature: source_signature, taken: SystemTime::now() };
+        let snapshot =
+            Snapshot { _dir: dir, source: source.to_path_buf(), signature: source_signature, taken: SystemTime::now() };
         Ok(Self { conn, path, mode: Mode::Snapshot, guard: Guard::RefuseWhileRunning, snapshot: Some(snapshot) })
     }
 
@@ -175,7 +179,9 @@ impl Library {
                 return Err(Error::RekordboxRunning);
             }
             if std::env::var_os("RB_LIBRARY_TEST").is_some() && Some(self.path.clone()) == Self::installed_path() {
-                return Err(Error::Refused("RB_LIBRARY_TEST is set; the installed library is never written in tests".into()));
+                return Err(Error::Refused(
+                    "RB_LIBRARY_TEST is set; the installed library is never written in tests".into(),
+                ));
             }
         }
         write::run(&mut self.conn, &self.path.with_file_name("masterPlaylists6.xml"), edit)
@@ -192,12 +198,13 @@ pub struct Counts {
 /// Open a database file, check it is intact, and count what is in it.
 pub fn verify(path: &Path) -> Result<Counts> {
     let conn = unlock(path)?;
-    let rows: Vec<String> = conn
-        .prepare("PRAGMA quick_check")?
-        .query_map([], |row| row.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+    let rows: Vec<String> =
+        conn.prepare("PRAGMA quick_check")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
     if rows != ["ok"] {
-        return Err(Error::Refused(format!("The database is damaged: {}", rows.first().map_or("no result", String::as_str))));
+        return Err(Error::Refused(format!(
+            "The database is damaged: {}",
+            rows.first().map_or("no result", String::as_str)
+        )));
     }
     let count = |sql: &str| conn.query_row(sql, [], |row| row.get::<_, i64>(0));
     Ok(Counts {

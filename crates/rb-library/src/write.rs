@@ -23,7 +23,11 @@ const CUE_FRAMES_PER_SECOND: i64 = 150;
 
 fn clamp_msec(msec: i64, length_seconds: i64) -> i64 {
     let msec = msec.max(0);
-    if length_seconds > 0 { msec.min(length_seconds * 1000) } else { msec }
+    if length_seconds > 0 {
+        msec.min(length_seconds * 1000)
+    } else {
+        msec
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,11 +227,9 @@ impl Tx<'_> {
     }
 
     fn content_state(&self, id: &str) -> Result<Option<bool>> {
-        let row = self
-            .tx
-            .query_row("SELECT rb_local_deleted FROM djmdContent WHERE ID = ?1", [id], |row| {
-                row.get::<_, Option<i64>>(0)
-            });
+        let row = self.tx.query_row("SELECT rb_local_deleted FROM djmdContent WHERE ID = ?1", [id], |row| {
+            row.get::<_, Option<i64>>(0)
+        });
         match row {
             Ok(flag) => Ok(Some(flag.unwrap_or(0) != 0)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -243,7 +245,8 @@ impl Tx<'_> {
                 continue;
             }
             if *table == "djmdSongPlaylist" {
-                let mut stmt = self.tx.prepare("SELECT DISTINCT PlaylistID FROM djmdSongPlaylist WHERE ContentID = ?1")?;
+                let mut stmt =
+                    self.tx.prepare("SELECT DISTINCT PlaylistID FROM djmdSongPlaylist WHERE ContentID = ?1")?;
                 for row in stmt.query_map([content_id], |row| row.get::<_, String>(0))? {
                     playlists.insert(row?);
                 }
@@ -282,9 +285,8 @@ impl Tx<'_> {
             if self.content_state(id)? != Some(false) {
                 continue;
             }
-            let analysis_path: Option<String> = self
-                .tx
-                .query_row("SELECT AnalysisDataPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
+            let analysis_path: Option<String> =
+                self.tx.query_row("SELECT AnalysisDataPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
             playlists.extend(self.clear_links(id)?);
             self.tx.execute(
                 "UPDATE djmdContent SET rb_local_deleted = 1, AnalysisDataPath = NULL, Analysed = 0, FileType = NULL, \
@@ -518,7 +520,9 @@ impl Tx<'_> {
             |row| row.get::<_, String>(0),
         ) {
             Ok(parent) => parent,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(Error::NotFound(format!("playlist {playlist_id}"))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(Error::NotFound(format!("playlist {playlist_id}")))
+            }
             Err(error) => return Err(error.into()),
         };
         let parent = if parent.is_empty() { "root" } else { parent };
@@ -577,7 +581,8 @@ impl Tx<'_> {
         if old_parent != parent {
             for (position, id) in source_order.iter().filter(|id| id.as_str() != playlist_id).enumerate() {
                 let wanted = i64::try_from(position + 1).unwrap_or(i64::MAX);
-                let current: i64 = self.tx.query_row("SELECT Seq FROM djmdPlaylist WHERE ID = ?1", [id], |row| row.get(0))?;
+                let current: i64 =
+                    self.tx.query_row("SELECT Seq FROM djmdPlaylist WHERE ID = ?1", [id], |row| row.get(0))?;
                 if current != wanted {
                     self.tx.execute("UPDATE djmdPlaylist SET Seq = ?1 WHERE ID = ?2", params![wanted, id])?;
                     self.stamp("djmdPlaylist", id)?;
@@ -616,7 +621,9 @@ impl Tx<'_> {
             |row| row.get::<_, Option<String>>(0),
         );
         match current {
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(Error::NotFound(format!("playlist {playlist_id}"))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(Error::NotFound(format!("playlist {playlist_id}")))
+            }
             Err(e) => return Err(e.into()),
             Ok(current) if current.as_deref() == Some(name) => return Ok(()),
             Ok(_) => {}
@@ -636,14 +643,17 @@ impl Tx<'_> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ) {
             Ok(row) => row,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Err(Error::NotFound(format!("playlist {playlist_id}"))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(Error::NotFound(format!("playlist {playlist_id}")))
+            }
             Err(e) => return Err(e.into()),
         };
         let mut doomed = vec![playlist_id.to_owned()];
         let mut at = 0;
         while at < doomed.len() {
             let mut stmt = self.tx.prepare("SELECT ID FROM djmdPlaylist WHERE ParentID = ?1")?;
-            let children: Vec<String> = stmt.query_map([&doomed[at]], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let children: Vec<String> =
+                stmt.query_map([&doomed[at]], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
             doomed.extend(children);
             at += 1;
         }
@@ -725,7 +735,8 @@ impl Tx<'_> {
     }
 
     fn resolve_names(&mut self, edit: &TrackEdit) -> Result<Vec<(&'static str, Value)>> {
-        let named = [&edit.artist, &edit.remixer, &edit.original_artist, &edit.composer, &edit.album, &edit.genre, &edit.label];
+        let named =
+            [&edit.artist, &edit.remixer, &edit.original_artist, &edit.composer, &edit.album, &edit.genre, &edit.label];
         let mut resolved = Vec::new();
         for ((column, table), name) in NAMED.iter().zip(named) {
             if let Some(name) = name {
@@ -765,9 +776,11 @@ impl Tx<'_> {
         if self.content_state(id)? != Some(false) {
             return Err(Error::NotFound(format!("live track {id}")));
         }
-        let old: Option<String> = self.tx.query_row("SELECT FolderPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
+        let old: Option<String> =
+            self.tx.query_row("SELECT FolderPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
         let mut changed = self.set_content(id, "FolderPath", Value::Text(stored.to_owned()))?;
-        let org: Option<String> = self.tx.query_row("SELECT OrgFolderPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
+        let org: Option<String> =
+            self.tx.query_row("SELECT OrgFolderPath FROM djmdContent WHERE ID = ?1", [id], |row| row.get(0))?;
         if org == old {
             changed |= self.set_content(id, "OrgFolderPath", Value::Text(stored.to_owned()))?;
         }
@@ -789,8 +802,10 @@ impl Tx<'_> {
 
     /// Ids and removed flags of every row with this stored path.
     pub fn tracks_at(&self, path: &str) -> Result<Vec<(String, bool)>> {
-        let mut stmt = self.tx.prepare("SELECT ID, rb_local_deleted FROM djmdContent WHERE FolderPath = ?1 ORDER BY ID")?;
-        let rows = stmt.query_map([path], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0) != 0)))?;
+        let mut stmt =
+            self.tx.prepare("SELECT ID, rb_local_deleted FROM djmdContent WHERE FolderPath = ?1 ORDER BY ID")?;
+        let rows = stmt
+            .query_map([path], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0) != 0)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -806,12 +821,11 @@ impl Tx<'_> {
     pub fn create_track(&mut self, new: &NewTrack) -> Result<String> {
         let id = unused_id(&self.tx, "djmdContent")?;
         let file_id = unused_value(&self.tx, "djmdContent", "rb_file_id")?;
-        let (device, master) = Self::first_or_none(self.tx.query_row(
-            "SELECT ID, MasterDBID FROM djmdDevice LIMIT 1",
-            [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
-        ))?
-        .unwrap_or((None, None));
+        let (device, master) =
+            Self::first_or_none(self.tx.query_row("SELECT ID, MasterDBID FROM djmdDevice LIMIT 1", [], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))
+            }))?
+            .unwrap_or((None, None));
         let link = Self::first_or_none(self.tx.query_row(
             "SELECT rb_local_usn FROM djmdMenuItems WHERE Name = 'TRACK' LIMIT 1",
             [],
@@ -991,7 +1005,8 @@ impl Tx<'_> {
     }
 
     pub fn delete_cue(&mut self, content_id: &str, cue_id: &str) -> Result<()> {
-        let removed = self.tx.execute("DELETE FROM djmdCue WHERE ID = ?1 AND ContentID = ?2", params![cue_id, content_id])?;
+        let removed =
+            self.tx.execute("DELETE FROM djmdCue WHERE ID = ?1 AND ContentID = ?2", params![cue_id, content_id])?;
         if removed > 0 {
             self.touched = true;
         }
@@ -1070,8 +1085,9 @@ impl Tx<'_> {
         self.require_tag(tag_id)?;
         let mut removed = 0;
         for id in content_ids {
-            removed +=
-                self.tx.execute("DELETE FROM djmdSongMyTag WHERE MyTagID = ?1 AND ContentID = ?2", params![tag_id, id])?;
+            removed += self
+                .tx
+                .execute("DELETE FROM djmdSongMyTag WHERE MyTagID = ?1 AND ContentID = ?2", params![tag_id, id])?;
         }
         if removed > 0 {
             self.touched = true;
@@ -1201,7 +1217,8 @@ impl Tx<'_> {
             self.set_content(content_id, "BPM", Value::Integer(bpm))?;
         }
         if let Some((tonic, minor)) = write.key {
-            let have: Option<String> = self.tx.query_row("SELECT KeyID FROM djmdContent WHERE ID = ?1", [content_id], |row| row.get(0))?;
+            let have: Option<String> =
+                self.tx.query_row("SELECT KeyID FROM djmdContent WHERE ID = ?1", [content_id], |row| row.get(0))?;
             if write.overwrite_key || have.is_none_or(|k| k.is_empty()) {
                 let key = self.key_id(tonic, minor)?;
                 self.set_content(content_id, "KeyID", Value::Text(key))?;
@@ -1209,13 +1226,16 @@ impl Tx<'_> {
         }
         self.set_content(content_id, "AnalysisDataPath", Value::Text(write.relative_path.to_owned()))?;
         self.set_content(content_id, "Analysed", Value::Integer(ANALYSED))?;
-        let length: Option<i64> = self.tx.query_row("SELECT Length FROM djmdContent WHERE ID = ?1", [content_id], |row| row.get(0))?;
+        let length: Option<i64> =
+            self.tx.query_row("SELECT Length FROM djmdContent WHERE ID = ?1", [content_id], |row| row.get(0))?;
         if write.duration_secs != 0 && length.unwrap_or(0) == 0 {
             self.set_content(content_id, "Length", Value::Integer(write.duration_secs))?;
         }
-        let updated: Option<String> = self
-            .tx
-            .query_row("SELECT CAST(AnalysisUpdated AS TEXT) FROM djmdContent WHERE ID = ?1", [content_id], |row| row.get(0))?;
+        let updated: Option<String> = self.tx.query_row(
+            "SELECT CAST(AnalysisUpdated AS TEXT) FROM djmdContent WHERE ID = ?1",
+            [content_id],
+            |row| row.get(0),
+        )?;
         let next = updated.and_then(|u| u.parse::<i64>().ok()).map_or(1, |u| u + 1);
         self.tx.execute("UPDATE djmdContent SET AnalysisUpdated = ?1 WHERE ID = ?2", params![next, content_id])?;
         self.stamp("djmdContent", content_id)
@@ -1245,9 +1265,30 @@ pub struct Converted {
 
 /// Track columns a converted copy inherits; file, analysis and sync columns are rebuilt.
 const COPIED_COLUMNS: [&str; 24] = [
-    "Title", "ArtistID", "AlbumID", "GenreID", "BPM", "TrackNo", "Commnt", "Rating", "ReleaseYear", "RemixerID", "LabelID",
-    "OrgArtistID", "KeyID", "ColorID", "ImagePath", "DiscNo", "ComposerID", "Subtitle", "ReleaseDate", "DateCreated",
-    "Lyricist", "ISRC", "DisableQuantize", "HotCueAutoLoad",
+    "Title",
+    "ArtistID",
+    "AlbumID",
+    "GenreID",
+    "BPM",
+    "TrackNo",
+    "Commnt",
+    "Rating",
+    "ReleaseYear",
+    "RemixerID",
+    "LabelID",
+    "OrgArtistID",
+    "KeyID",
+    "ColorID",
+    "ImagePath",
+    "DiscNo",
+    "ComposerID",
+    "Subtitle",
+    "ReleaseDate",
+    "DateCreated",
+    "Lyricist",
+    "ISRC",
+    "DisableQuantize",
+    "HotCueAutoLoad",
 ];
 
 impl Tx<'_> {
@@ -1264,14 +1305,16 @@ impl Tx<'_> {
             return Err(Error::NotFound(format!("live track {source_id}")));
         }
         let (_, length) = self.cue_context(source_id)?;
-        let shifted = |msec: i64| if target.offset_ms == 0 { msec } else { clamp_msec(msec + target.offset_ms, length) };
+        let shifted =
+            |msec: i64| if target.offset_ms == 0 { msec } else { clamp_msec(msec + target.offset_ms, length) };
         let columns = self.content_columns()?;
         let row_id = if copy {
             let at = self.tracks_at(&target.stored)?;
             if at.iter().any(|(_, removed)| !removed) {
                 return Err(Error::Refused("The converted file is already in the collection".into()));
             }
-            let title: Option<String> = self.tx.query_row("SELECT Title FROM djmdContent WHERE ID = ?1", [source_id], |row| row.get(0))?;
+            let title: Option<String> =
+                self.tx.query_row("SELECT Title FROM djmdContent WHERE ID = ?1", [source_id], |row| row.get(0))?;
             let id = if let Some((id, _)) = at.first() {
                 self.restore_track(id)?;
                 self.set_content(id, "Title", title.map_or(Value::Null, Value::Text))?;
@@ -1289,13 +1332,18 @@ impl Tx<'_> {
                 })?
             };
             for column in COPIED_COLUMNS.iter().filter(|c| columns.iter().any(|have| have == *c)) {
-                let value: Value = self.tx.query_row(&format!("SELECT {column} FROM djmdContent WHERE ID = ?1"), [source_id], |row| row.get(0))?;
+                let value: Value = self.tx.query_row(
+                    &format!("SELECT {column} FROM djmdContent WHERE ID = ?1"),
+                    [source_id],
+                    |row| row.get(0),
+                )?;
                 if value != Value::Null {
                     self.set_content(&id, column, value)?;
                 }
             }
             self.tx.execute(&format!("UPDATE djmdContent SET StockDate = {TODAY} WHERE ID = ?1"), [&id])?;
-            let new_uuid: Option<String> = self.tx.query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [&id], |row| row.get(0))?;
+            let new_uuid: Option<String> =
+                self.tx.query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [&id], |row| row.get(0))?;
             let mut stmt = self.tx.prepare(
                 "SELECT Kind, InMsec, OutMsec, Color, ColorTableIndex, Comment, ActiveLoop, BeatLoopSize FROM djmdCue \
                  WHERE ContentID = ?1 AND rb_local_deleted = 0 ORDER BY rowid",
@@ -1324,14 +1372,19 @@ impl Tx<'_> {
                 )?;
                 if let Some(out) = out.filter(|o| *o >= 0) {
                     let out = shifted(out);
-                    self.tx.execute("UPDATE djmdCue SET OutMsec = ?1, OutFrame = ?2 WHERE ID = ?3", params![out, out * CUE_FRAMES_PER_SECOND / 1000, cue])?;
+                    self.tx.execute(
+                        "UPDATE djmdCue SET OutMsec = ?1, OutFrame = ?2 WHERE ID = ?3",
+                        params![out, out * CUE_FRAMES_PER_SECOND / 1000, cue],
+                    )?;
                 }
             }
             id
         } else {
             self.set_content(source_id, "FolderPath", Value::Text(target.stored.clone()))?;
             if target.offset_ms != 0 {
-                let mut stmt = self.tx.prepare("SELECT ID, InMsec, OutMsec FROM djmdCue WHERE ContentID = ?1 AND rb_local_deleted = 0")?;
+                let mut stmt = self
+                    .tx
+                    .prepare("SELECT ID, InMsec, OutMsec FROM djmdCue WHERE ContentID = ?1 AND rb_local_deleted = 0")?;
                 let moves: Vec<CueMove> = stmt
                     .query_map([source_id], |row| {
                         let out = row.get::<_, Option<i64>>(2)?;
@@ -1367,15 +1420,23 @@ impl Tx<'_> {
         let mut analysis = None;
         if target.carry_analysis {
             let relative = if copy {
-                let uuid: Option<String> = self.tx.query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [&row_id], |row| row.get(0))?;
-                let uuid = uuid.filter(|u| u.len() > 3).ok_or_else(|| Error::Refused("the new track has no UUID".into()))?;
+                let uuid: Option<String> =
+                    self.tx.query_row("SELECT UUID FROM djmdContent WHERE ID = ?1", [&row_id], |row| row.get(0))?;
+                let uuid =
+                    uuid.filter(|u| u.len() > 3).ok_or_else(|| Error::Refused("the new track has no UUID".into()))?;
                 let relative = format!("/PIONEER/USBANLZ/{}/{}/ANLZ0000.DAT", &uuid[..3], &uuid[3..]);
                 self.set_content(&row_id, "AnalysisDataPath", Value::Text(relative.clone()))?;
-                let analysed: Value = self.tx.query_row("SELECT Analysed FROM djmdContent WHERE ID = ?1", [source_id], |row| row.get(0))?;
+                let analysed: Value =
+                    self.tx
+                        .query_row("SELECT Analysed FROM djmdContent WHERE ID = ?1", [source_id], |row| row.get(0))?;
                 self.set_content(&row_id, "Analysed", analysed)?;
                 relative
             } else {
-                self.tx.query_row("SELECT AnalysisDataPath FROM djmdContent WHERE ID = ?1", [&row_id], |row| row.get::<_, Option<String>>(0))?.unwrap_or_default()
+                self.tx
+                    .query_row("SELECT AnalysisDataPath FROM djmdContent WHERE ID = ?1", [&row_id], |row| {
+                        row.get::<_, Option<String>>(0)
+                    })?
+                    .unwrap_or_default()
             };
             analysis = Some(relative);
         }

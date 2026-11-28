@@ -296,16 +296,20 @@ mod tests {
         Rows(connection).track("1", "Track").unwrap();
         Rows(connection).song("10", "1", 1).unwrap();
         let revision = || library.export_bundle(&["10".into()]).unwrap().playlists[0].entries_changed_ms;
-        connection.execute_batch(
-            "UPDATE djmdSongPlaylist SET created_at = '2026-10-12 23:06:11.399 +00:00', \
+        connection
+            .execute_batch(
+                "UPDATE djmdSongPlaylist SET created_at = '2026-10-12 23:06:11.399 +00:00', \
              updated_at = '2026-10-13 01:06:11.399 +02:00'",
-        ).unwrap();
+            )
+            .unwrap();
         let original = revision().unwrap();
         assert_eq!(original % 1000, 399);
-        connection.execute_batch(
-            "UPDATE djmdSongPlaylist SET rb_local_deleted = 1, \
+        connection
+            .execute_batch(
+                "UPDATE djmdSongPlaylist SET rb_local_deleted = 1, \
              updated_at = '2026-10-12 23:06:12.155 +00:00'",
-        ).unwrap();
+            )
+            .unwrap();
         assert_eq!(revision(), Some(original + 756));
         connection.execute_batch("UPDATE djmdSongPlaylist SET updated_at = 'unknown'").unwrap();
         assert_eq!(revision(), None);

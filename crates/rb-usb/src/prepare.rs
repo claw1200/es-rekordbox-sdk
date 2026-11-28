@@ -19,12 +19,7 @@ fn narrow_u8(value: u32) -> u8 {
 ///
 /// `BeatLoopSize` is `(numerator << 16) | denominator`. This is the same
 /// derivation used when reading `djmdCue`.
-fn loop_end(
-    start_ms: u32,
-    stored_end: Option<i64>,
-    beat_loop_size: u32,
-    bpm_x100: u32,
-) -> Option<u32> {
+fn loop_end(start_ms: u32, stored_end: Option<i64>, beat_loop_size: u32, bpm_x100: u32) -> Option<u32> {
     if let Some(end) = stored_end.and_then(|end| u32::try_from(end).ok()) {
         if end > start_ms {
             return Some(end);
@@ -36,10 +31,7 @@ fn loop_end(
         return None;
     }
     let divisor = denominator.saturating_mul(u64::from(bpm_x100));
-    let duration_ms = numerator
-        .saturating_mul(6_000_000)
-        .saturating_add(divisor / 2)
-        / divisor;
+    let duration_ms = numerator.saturating_mul(6_000_000).saturating_add(divisor / 2) / divisor;
     u32::try_from(u64::from(start_ms).saturating_add(duration_ms)).ok()
 }
 
@@ -49,11 +41,7 @@ fn export_cue(cue: &Cue, bpm_x100: u32) -> ExportCue {
         kind: cue.kind,
         time_ms: cue.time_ms,
         loop_time_ms: loop_end(cue.time_ms, cue.end_ms, cue.beat_loop_size, bpm_x100),
-        color_id: if cue.kind == 0 {
-            u8::try_from(color).ok().filter(|c| *c != 255).unwrap_or(0)
-        } else {
-            0
-        },
+        color_id: if cue.kind == 0 { u8::try_from(color).ok().filter(|c| *c != 255).unwrap_or(0) } else { 0 },
         color_code: cue.color_code,
         comment: cue.comment.clone(),
         active_loop: cue.active_loop,
@@ -65,17 +53,9 @@ fn export_cue(cue: &Cue, bpm_x100: u32) -> ExportCue {
 fn analysis_bytes(paths: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, Error> {
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("DAT")
-            .to_ascii_uppercase();
-        let bytes = fs::read(path).map_err(|err| {
-            Error::InvalidInput(format!(
-                "Analysis file is unreadable ({}): {err}",
-                path.display()
-            ))
-        })?;
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("DAT").to_ascii_uppercase();
+        let bytes = fs::read(path)
+            .map_err(|err| Error::InvalidInput(format!("Analysis file is unreadable ({}): {err}", path.display())))?;
         files.push((extension, bytes));
     }
     Ok(files)
@@ -83,29 +63,15 @@ fn analysis_bytes(paths: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, Error> {
 
 pub(crate) fn prepare(
     job: &Source,
-) -> Result<
-    (
-        Vec<SourceTrack>,
-        Vec<SourcePlaylist>,
-        Vec<SourceMyTag>,
-        SyncSource,
-    ),
-    Error,
-> {
+) -> Result<(Vec<SourceTrack>, Vec<SourcePlaylist>, Vec<SourceMyTag>, SyncSource), Error> {
     let mut tracks = Vec::with_capacity(job.tracks.len());
     let mut index_of: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
     for track in &job.tracks {
         if index_of.insert(track.id, tracks.len()).is_some() && track.id != 0 {
-            return Err(Error::InvalidInput(format!(
-                "Duplicate track id {}",
-                track.id
-            )));
+            return Err(Error::InvalidInput(format!("Duplicate track id {}", track.id)));
         }
-        let cues = track.cues.as_ref().map(|cues| {
-            cues.iter()
-                .map(|cue| export_cue(cue, track.bpm_x100))
-                .collect::<Vec<_>>()
-        });
+        let cues =
+            track.cues.as_ref().map(|cues| cues.iter().map(|cue| export_cue(cue, track.bpm_x100)).collect::<Vec<_>>());
         tracks.push(SourceTrack {
             metadata: rbl_core::ExportMetadata {
                 track_number: track.metadata.track_number,

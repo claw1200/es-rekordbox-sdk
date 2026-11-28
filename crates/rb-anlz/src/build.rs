@@ -58,7 +58,8 @@ const PWV7: [Lane; 3] = [
 ];
 
 /// The waveform tags each analysis file holds.
-pub const WAVE_TAGS: [(&str, &[&str]); 3] = [("DAT", &["PWAV", "PWV2"]), ("EXT", &["PWV3", "PWV5", "PWV4"]), ("2EX", &["PWV7", "PWV6"])];
+pub const WAVE_TAGS: [(&str, &[&str]); 3] =
+    [("DAT", &["PWAV", "PWV2"]), ("EXT", &["PWV3", "PWV5", "PWV4"]), ("2EX", &["PWV7", "PWV6"])];
 
 type Row = [f64; FEATURES];
 
@@ -129,12 +130,18 @@ pub type Beat = (u16, u16, u32);
 
 #[must_use]
 pub fn beatgrid_tag(beats: &[Beat]) -> Vec<u8> {
-    let body: Vec<u8> = beats.iter().flat_map(|(n, t, ms)| [n.to_be_bytes().as_slice(), &t.to_be_bytes(), &ms.to_be_bytes()].concat()).collect();
+    let body: Vec<u8> = beats
+        .iter()
+        .flat_map(|(n, t, ms)| [n.to_be_bytes().as_slice(), &t.to_be_bytes(), &ms.to_be_bytes()].concat())
+        .collect();
     tag("PQTZ", &words(&[0, 0x80000, u32::try_from(beats.len()).unwrap_or(0)]), &body)
 }
 
 fn cue_tags() -> Vec<Vec<u8>> {
-    [1u32, 0].iter().map(|kind| tag("PCOB", &[kind.to_be_bytes().as_slice(), &[0, 0, 0, 0], &(-1i32).to_be_bytes()].concat(), &[])).collect()
+    [1u32, 0]
+        .iter()
+        .map(|kind| tag("PCOB", &[kind.to_be_bytes().as_slice(), &[0, 0, 0, 0], &(-1i32).to_be_bytes()].concat(), &[]))
+        .collect()
 }
 
 fn extended_cue_tags() -> Vec<Vec<u8>> {
@@ -154,7 +161,10 @@ pub fn wave_tags(features: &[Row]) -> Vec<(&'static str, Vec<u8>)> {
     let pwv3: Vec<u8> = features.iter().map(|r| (lane(&PWV3_H, r) | (lane(&PWV3_W, r) << 5)) as u8).collect();
     let pwv5: Vec<u8> = features
         .iter()
-        .flat_map(|r| ((lane(&PWV5_R, r) << 13) | (lane(&PWV5_G, r) << 10) | (lane(&PWV5_B, r) << 7) | (lane(&PWV5_H, r) << 2)).to_be_bytes())
+        .flat_map(|r| {
+            ((lane(&PWV5_R, r) << 13) | (lane(&PWV5_G, r) << 10) | (lane(&PWV5_B, r) << 7) | (lane(&PWV5_H, r) << 2))
+                .to_be_bytes()
+        })
         .collect();
     let pwv4: Vec<u8> = color
         .iter()
@@ -199,8 +209,10 @@ pub fn new_files(audio_name: &str, beats: &[Beat], features: &[Row]) -> [(&'stat
     let path = crate::write::path_tag(&format!("?/{audio_name}"));
     let waves = wave_tags(features);
     let wave = |kind: &str| waves.iter().find(|(k, _)| *k == kind).map(|(_, t)| t.clone()).unwrap_or_default();
-    let dat: Vec<Vec<u8>> = [vec![path.clone(), empty_vbr_tag(), beatgrid_tag(beats), wave("PWAV"), wave("PWV2")], cue_tags()].concat();
-    let ext: Vec<Vec<u8>> = [vec![path.clone(), wave("PWV3")], cue_tags(), extended_cue_tags(), vec![wave("PWV5"), wave("PWV4")]].concat();
+    let dat: Vec<Vec<u8>> =
+        [vec![path.clone(), empty_vbr_tag(), beatgrid_tag(beats), wave("PWAV"), wave("PWV2")], cue_tags()].concat();
+    let ext: Vec<Vec<u8>> =
+        [vec![path.clone(), wave("PWV3")], cue_tags(), extended_cue_tags(), vec![wave("PWV5"), wave("PWV4")]].concat();
     let ex2 = vec![path, wave("PWV7"), wave("PWV6")];
     [("DAT", file(&dat)), ("EXT", file(&ext)), ("2EX", file(&ex2))]
 }
@@ -239,8 +251,12 @@ mod tests {
             assert!(Tags::parse(parsed.to_bytes()).is_ok());
         }
         let parsed = rbl_anlz::parse(&files[0].1).unwrap();
-        let actual: Vec<_> = parsed.beat_grid().unwrap().into_iter()
-            .map(|beat| (beat.beat_number, beat.tempo_x100, beat.time_ms)).collect();
+        let actual: Vec<_> = parsed
+            .beat_grid()
+            .unwrap()
+            .into_iter()
+            .map(|beat| (beat.beat_number, beat.tempo_x100, beat.time_ms))
+            .collect();
         assert_eq!(actual, beats);
     }
 

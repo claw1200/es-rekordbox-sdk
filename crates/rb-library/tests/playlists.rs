@@ -25,10 +25,16 @@ fn scene() -> Scene {
         for (n, id) in ["1", "2", "3", "4"].iter().enumerate() {
             rows.song("10", id, i64::try_from(n).unwrap() + 1).unwrap();
         }
-        conn.execute("INSERT INTO djmdMyTag (ID, Name, Attribute, ParentID, Seq) VALUES ('t1', 'Tag', 0, 'root', 1)", [])
-            .unwrap();
-        conn.execute("INSERT INTO djmdMyTag (ID, Name, Attribute, ParentID, Seq) VALUES ('t2', 'Dir', 1, 'root', 2)", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO djmdMyTag (ID, Name, Attribute, ParentID, Seq) VALUES ('t1', 'Tag', 0, 'root', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO djmdMyTag (ID, Name, Attribute, ParentID, Seq) VALUES ('t2', 'Dir', 1, 'root', 2)",
+            [],
+        )
+        .unwrap();
         conn.execute("UPDATE djmdPlaylist SET Seq = 1 WHERE ID = '10'", []).unwrap();
         conn.execute("UPDATE djmdPlaylist SET Seq = 2 WHERE ID = '11'", []).unwrap();
     }
@@ -88,11 +94,9 @@ fn moving_root_playlists_ignores_hidden_row_and_null_parents() {
         Rows(&conn).playlist(hidden, "Cloud sync", 0).unwrap();
         conn.execute("UPDATE djmdPlaylist SET ParentID = NULL WHERE ID IN ('10', '11', ?1)", [hidden]).unwrap();
         conn.execute("UPDATE djmdPlaylist SET Seq = 0 WHERE ID = ?1", [hidden]).unwrap();
-        conn.query_row(
-            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
-            [hidden],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
+        conn.query_row("SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1", [hidden], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .unwrap()
     };
 
@@ -103,11 +107,9 @@ fn moving_root_playlists_ignores_hidden_row_and_null_parents() {
     assert_eq!(visible.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), ["11", "10"]);
     let conn = fixture::connect(s.lib.path()).unwrap();
     let after: (Option<i64>, Option<i64>, Option<String>) = conn
-        .query_row(
-            "SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1",
-            [hidden],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
+        .query_row("SELECT rb_local_usn, Seq, ParentID FROM djmdPlaylist WHERE ID = ?1", [hidden], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .unwrap();
     assert_eq!(after, before);
 }
@@ -181,13 +183,17 @@ fn removed_tracks_lose_their_analysis_columns_and_report_the_files() {
     let mut s = scene();
     {
         let conn = fixture::connect(s.lib.path()).unwrap();
-        conn.execute("UPDATE djmdContent SET AnalysisDataPath = '/PIONEER/a/ANLZ0000.DAT', Analysed = 105 WHERE ID = '1'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE djmdContent SET AnalysisDataPath = '/PIONEER/a/ANLZ0000.DAT', Analysed = 105 WHERE ID = '1'",
+            [],
+        )
+        .unwrap();
     }
     let removed = s.lib.write(|tx| tx.remove_tracks(&["1".into(), "2".into()])).unwrap();
     assert_eq!(removed[0].analysis_path.as_deref(), Some("/PIONEER/a/ANLZ0000.DAT"));
     assert_eq!(removed[1].analysis_path, None);
     let conn = fixture::connect(s.lib.path()).unwrap();
-    let analysed: Option<i64> = conn.query_row("SELECT Analysed FROM djmdContent WHERE ID = '1'", [], |r| r.get(0)).unwrap();
+    let analysed: Option<i64> =
+        conn.query_row("SELECT Analysed FROM djmdContent WHERE ID = '1'", [], |r| r.get(0)).unwrap();
     assert_eq!(analysed, Some(0));
 }

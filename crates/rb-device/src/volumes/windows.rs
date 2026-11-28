@@ -32,7 +32,9 @@ use windows_sys::Win32::{
         Properties::{DEVPKEY_Device_InstanceId, DEVPROPTYPE},
     },
     Foundation::{ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, MAX_PATH},
-    Storage::FileSystem::{CreateFileW, GetDriveTypeW, FILE_DEVICE_DISK, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
+    Storage::FileSystem::{
+        CreateFileW, GetDriveTypeW, FILE_DEVICE_DISK, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    },
     System::{
         Ioctl::{
             FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_EJECT_MEDIA,
@@ -43,7 +45,9 @@ use windows_sys::Win32::{
     },
 };
 
-use super::safe_removal::{drive_letter, eject_target, is_hub, is_interface_id, multi_strings, veto_message, DeviceNode, EjectTarget};
+use super::safe_removal::{
+    drive_letter, eject_target, is_hub, is_interface_id, multi_strings, veto_message, DeviceNode, EjectTarget,
+};
 use super::Mounted;
 use crate::{fail, Error, Result};
 
@@ -145,7 +149,15 @@ fn until_nul(buffer: &[u16]) -> &[u16] {
 fn device_number(path: &[u16]) -> io::Result<STORAGE_DEVICE_NUMBER> {
     // SAFETY: NUL-terminated name and null optional pointers; synchronous handle.
     let raw = unsafe {
-        CreateFileW(path.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, 0, std::ptr::null_mut())
+        CreateFileW(
+            path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
     };
     if raw == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
@@ -298,7 +310,14 @@ fn registry_property(node: u32, property: u32) -> Option<Vec<u16>> {
     let mut size = u32::try_from(units * 2).ok()?;
     // SAFETY: The buffer holds at least `size` bytes; the type out pointer is optional.
     let code = unsafe {
-        CM_Get_DevNode_Registry_PropertyW(node, property, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &raw mut size, 0)
+        CM_Get_DevNode_Registry_PropertyW(
+            node,
+            property,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &raw mut size,
+            0,
+        )
     };
     (code == CR_SUCCESS).then_some(buffer)
 }
@@ -371,7 +390,11 @@ fn eject_media(volume: &[u16]) -> io::Result<()> {
                 std::ptr::null_mut(),
             )
         };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        if ok == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     };
     let denied = |result: &io::Result<()>| matches!(result, Err(error) if is_access_denied(error));
     let mut locked = control(FSCTL_LOCK_VOLUME);
