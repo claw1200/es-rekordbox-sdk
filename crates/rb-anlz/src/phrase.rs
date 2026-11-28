@@ -110,12 +110,8 @@ pub fn song_structure(ext: &Tags) -> Option<SongStructure> {
 }
 
 fn read_mood(body: &[u8]) -> Option<Mood> {
-    match be16(body, 0)? {
-        1 => Some(Mood::High),
-        2 => Some(Mood::Mid),
-        3 => Some(Mood::Low),
-        _ => None,
-    }
+    let code = be16(body, 0)?;
+    [Mood::High, Mood::Mid, Mood::Low].into_iter().find(|&mood| mood_code(mood) == code)
 }
 
 fn unmask(body: &mut [u8], phrase_count: u16) {
@@ -161,6 +157,87 @@ fn kind_and_variant(mood: Mood, kind: u16, entry: &[u8]) -> (Option<PhraseKind>,
         (Mood::Mid | Mood::Low, 10) => (Some(PhraseKind::Outro), None),
         _ => (None, None),
     }
+}
+
+/// The flags beside the stored kind that pick a high-mood phrase's numbered variant.
+#[derive(Default)]
+struct VariantFlags {
+    first_intro_chorus_or_outro: bool,
+    is_up_2: bool,
+    is_up_3: bool,
+}
+
+/// The stored kind of a phrase, or none for a kind the mood has no slot for (an `UP` in a mid-mood
+/// track, say).
+fn stored_kind(mood: Mood, kind: PhraseKind, variant: Option<u8>) -> Option<(u16, VariantFlags)> {
+    let first = VariantFlags { first_intro_chorus_or_outro: variant != Some(2), ..VariantFlags::default() };
+    let plain = |stored: u16| Some((stored, VariantFlags::default()));
+    match (mood, kind) {
+        (Mood::High, PhraseKind::Intro) => Some((1, first)),
+        (Mood::High, PhraseKind::Up) => Some((
+            2,
+            VariantFlags { is_up_2: variant == Some(2), is_up_3: variant == Some(3), ..VariantFlags::default() },
+        )),
+        (Mood::High, PhraseKind::Down) => plain(3),
+        (Mood::High, PhraseKind::Chorus) => Some((5, first)),
+        (Mood::High, PhraseKind::Outro) => Some((6, first)),
+        (Mood::Mid | Mood::Low, PhraseKind::Intro) => plain(1),
+        (Mood::Mid, PhraseKind::Verse) => plain(u16::from(variant.unwrap_or(1).clamp(1, 6)) + 1),
+        (Mood::Low, PhraseKind::Verse) => plain(if variant == Some(2) { 5 } else { 2 }),
+        (Mood::Mid | Mood::Low, PhraseKind::Bridge) => plain(8),
+        (Mood::Mid | Mood::Low, PhraseKind::Chorus) => plain(9),
+        (Mood::Mid | Mood::Low, PhraseKind::Outro) => plain(10),
+        _ => None,
+    }
+}
+
+fn mood_code(mood: Mood) -> u16 {
+    match mood {
+        Mood::High => 1,
+        Mood::Mid => 2,
+        Mood::Low => 3,
+    }
+}
+
+/// A `PSSI` tag holding `structure`, unmasked as rekordbox 7 writes into its own library. Phrases
+/// of a kind the mood has no slot for are left out.
+#[must_use]
+pub fn song_structure_tag(structure: &SongStructure) -> Vec<u8> {
+    let entries: Vec<[u8; SMALLEST_ENTRY]> = structure
+        .phrases
+        .iter()
+        .filter_map(|phrase| Some((phrase, stored_kind(structure.mood, phrase.kind?, phrase.variant)?)))
+        .enumerate()
+        .map(|(index, (phrase, (kind, flags)))| {
+            let mut entry = [0u8; SMALLEST_ENTRY];
+            entry[..2].copy_from_slice(&u16::try_from(index + 1).unwrap_or(u16::MAX).to_be_bytes());
+            entry[FIRST_BEAT_IN_ENTRY..FIRST_BEAT_IN_ENTRY + 2].copy_from_slice(&phrase.first_beat.to_be_bytes());
+            entry[KIND_IN_ENTRY..KIND_IN_ENTRY + 2].copy_from_slice(&kind.to_be_bytes());
+            entry[INTRO_CHORUS_OUTRO_VARIANT_IN_ENTRY] = u8::from(flags.first_intro_chorus_or_outro);
+            entry[IS_UP_2_IN_ENTRY] = u8::from(flags.is_up_2);
+            entry[IS_UP_3_IN_ENTRY] = u8::from(flags.is_up_3);
+            if let Some(beat) = phrase.fill_in_beat {
+                entry[HAS_FILL_IN_IN_ENTRY] = 1;
+                entry[FILL_IN_BEAT_IN_ENTRY..].copy_from_slice(&beat.to_be_bytes());
+            }
+            entry
+        })
+        .collect();
+
+    let header_length = BODY_AT + ENTRIES_IN_BODY;
+    let total_length = header_length + entries.len() * SMALLEST_ENTRY;
+    let mut tag = Vec::with_capacity(total_length);
+    tag.extend(PHRASE_TAG.as_bytes());
+    tag.extend(u32::try_from(header_length).unwrap_or(u32::MAX).to_be_bytes());
+    tag.extend(u32::try_from(total_length).unwrap_or(u32::MAX).to_be_bytes());
+    tag.extend(u32::try_from(SMALLEST_ENTRY).unwrap_or(u32::MAX).to_be_bytes());
+    tag.extend(u16::try_from(entries.len()).unwrap_or(u16::MAX).to_be_bytes());
+    tag.extend(mood_code(structure.mood).to_be_bytes());
+    tag.resize(BODY_AT + END_BEAT_IN_BODY, 0);
+    tag.extend(structure.end_beat.to_be_bytes());
+    tag.resize(header_length, 0);
+    tag.extend(entries.iter().flatten());
+    tag
 }
 
 #[cfg(test)]
@@ -209,12 +286,20 @@ mod tests {
         tag.extend(u32::try_from(SMALLEST_ENTRY).unwrap().to_be_bytes());
         tag.extend(count.to_be_bytes());
         tag.extend(body);
+        analysis_file(&tag)
+    }
+
+    fn analysis_file(tag: &[u8]) -> Vec<u8> {
         let mut file = b"PMAI".to_vec();
         file.extend(28u32.to_be_bytes());
         file.extend(u32::try_from(28 + tag.len()).unwrap().to_be_bytes());
         file.extend([0u8; 16]);
         file.extend(tag);
         file
+    }
+
+    fn written_and_read(structure: &SongStructure) -> SongStructure {
+        song_structure(&Tags::parse(analysis_file(&song_structure_tag(structure))).unwrap()).unwrap()
     }
 
     fn festival_anthem() -> Vec<Entry> {
@@ -284,5 +369,36 @@ mod tests {
         let body_start = 28 + BODY_AT;
         garbled[body_start..body_start + 2].copy_from_slice(&7u16.to_be_bytes());
         assert_eq!(song_structure(&Tags::parse(garbled).unwrap()), None);
+    }
+
+    #[test]
+    fn written_structures_read_back_unchanged() {
+        for (mood, entries) in [
+            (1, festival_anthem()),
+            (2, vec![entry(1, 1), entry(33, 4), entry(65, 7), entry(97, 8), entry(129, 9), entry(161, 10)]),
+            (3, vec![entry(1, 1), entry(33, 2), entry(65, 5), entry(97, 9), entry(129, 10)]),
+        ] {
+            let original = song_structure(&Tags::parse(pssi(mood, 513, &entries, false)).unwrap()).unwrap();
+            assert_eq!(written_and_read(&original), original);
+        }
+    }
+
+    #[test]
+    fn written_tags_match_the_layout_rekordbox_7_writes() {
+        let original = song_structure(&Tags::parse(pssi(1, 513, &festival_anthem(), false)).unwrap()).unwrap();
+        assert_eq!(analysis_file(&song_structure_tag(&original)), pssi(1, 513, &festival_anthem(), false));
+    }
+
+    #[test]
+    fn phrases_the_mood_has_no_slot_for_are_left_out() {
+        let phrase = |first_beat, kind| Phrase { first_beat, kind: Some(kind), variant: None, fill_in_beat: None };
+        let mid = SongStructure {
+            mood: Mood::Mid,
+            end_beat: 97,
+            phrases: vec![phrase(1, PhraseKind::Intro), phrase(33, PhraseKind::Up), phrase(65, PhraseKind::Chorus)],
+        };
+        let read = written_and_read(&mid);
+        assert_eq!(read.phrases.iter().map(ToString::to_string).collect::<Vec<_>>(), ["INTRO", "CHORUS"]);
+        assert_eq!(read.phrases[1].first_beat, 65);
     }
 }
