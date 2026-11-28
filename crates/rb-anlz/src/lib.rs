@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 pub mod build;
 pub mod decode;
+pub mod phrase;
 pub mod write;
 
 pub const PHRASE_TAG: &str = "PSSI";

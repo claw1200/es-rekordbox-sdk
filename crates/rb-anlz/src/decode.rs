@@ -59,11 +59,11 @@ impl Tags {
     }
 }
 
-fn be32(data: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn be32(data: &[u8], at: usize) -> Option<u32> {
     data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-fn be16(data: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn be16(data: &[u8], at: usize) -> Option<u16> {
     data.get(at..at + 2).map(|b| u16::from_be_bytes([b[0], b[1]]))
 }
 
